@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "workspace-analyzer"
+version = "0.1.0"
+description = "Backend-independent robot workspace analysis with batched FK/IK and Viser support"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+keywords = ["robotics", "kinematics", "workspace", "inverse-kinematics", "viser"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+torch = ["torch>=2.1"]
+viser = ["viser>=0.2", "trimesh>=4.0"]
+sampling = ["scipy>=1.10"]
+dev = ["build>=1.2", "pytest>=8", "ruff>=0.6"]
+all = ["torch>=2.1", "viser>=0.2", "trimesh>=4.0", "scipy>=1.10"]
+
+[project.scripts]
+workspace-analyzer = "workspace_analyzer.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/workspace_analyzer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers"
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.ruff.format]
+quote-style = "double"

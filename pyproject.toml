@@ -27,14 +27,29 @@ dependencies = ["numpy>=1.24"]
 torch = ["torch>=2.1"]
 viser = ["viser>=0.2", "trimesh>=4.0"]
 sampling = ["scipy>=1.10"]
-dev = ["build>=1.2", "pytest>=8", "ruff>=0.6"]
+dev = ["build>=1.2", "pytest>=8", "pytest-cov>=7", "ruff>=0.6"]
 all = ["torch>=2.1", "viser>=0.2", "trimesh>=4.0", "scipy>=1.10"]
 
 [project.scripts]
-workspace-analyzer = "workspace_analyzer.cli:main"
+workspace-analyzer = "workspace_analyzer.cli:entrypoint"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/workspace_analyzer"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/CHANGELOG.md",
+  "/CONTRIBUTING.md",
+  "/LICENSE",
+  "/Makefile",
+  "/README.md",
+  "/README.zh-CN.md",
+  "/docs",
+  "/examples",
+  "/pyproject.toml",
+  "/src",
+  "/tests",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

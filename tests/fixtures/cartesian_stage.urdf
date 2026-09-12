@@ -1,0 +1,15 @@
+<robot name="cartesian_stage">
+  <link name="base"/><link name="x"/><link name="y"/><link name="tcp"/>
+  <joint name="slide_x" type="prismatic">
+    <parent link="base"/><child link="x"/><axis xyz="1 0 0"/>
+    <limit lower="-1" upper="1" velocity="1"/>
+  </joint>
+  <joint name="slide_y" type="prismatic">
+    <parent link="x"/><child link="y"/><axis xyz="0 1 0"/>
+    <limit lower="-1" upper="1" velocity="1"/>
+  </joint>
+  <joint name="slide_z" type="prismatic">
+    <parent link="y"/><child link="tcp"/><axis xyz="0 0 1"/>
+    <limit lower="-1" upper="1" velocity="1"/>
+  </joint>
+</robot>

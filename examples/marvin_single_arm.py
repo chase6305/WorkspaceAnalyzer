@@ -16,10 +16,13 @@ from workspace_analyzer import (
     WorkspaceConfig,
     create_solver,
 )
-
-DEFAULT_URDF = Path(
-    "/home/ubuntu/workspace/chase/HumanoidAssets/Marvin_M6_S_CCS_696_V4.0/robot.urdf"
+from workspace_analyzer.presets import (
+    default_reference_joints,
+    default_robot_urdf,
+    require_robot_urdf,
 )
+
+DEFAULT_URDF = default_robot_urdf()
 
 
 def main() -> None:
@@ -30,7 +33,7 @@ def main() -> None:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--dtype", choices=("float32", "float64"), default="float32")
     parser.add_argument("--samples", type=int, default=100_000)
-    parser.add_argument("--batch-size", type=int, default=8192)
+    parser.add_argument("--batch-size", type=int, default=2048)
     parser.add_argument(
         "--strategy", choices=[x.value for x in SamplingStrategy], default="sobol"
     )
@@ -39,8 +42,20 @@ def main() -> None:
     )
     parser.add_argument("--viser", action="store_true")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument(
+        "--color-metric",
+        choices=(
+            "manipulability",
+            "minimum_singular_value",
+            "isotropy",
+            "joint_limit_margin",
+        ),
+        default="manipulability",
+    )
     parser.add_argument("--mode", choices=("joint", "cartesian"), default="joint")
     parser.add_argument("--ik-restarts", type=int, default=4)
+    parser.add_argument("--ik-rescue-restarts", type=int, default=16)
+    parser.add_argument("--ik-rescue-rounds", type=int, default=3)
     parser.add_argument(
         "--full-pose",
         action="store_true",
@@ -53,6 +68,7 @@ def main() -> None:
         help="reference joint vector; FK defines the Cartesian orientation",
     )
     args = parser.parse_args()
+    args.urdf = require_robot_urdf(args.urdf, parser)
 
     tip = f"{args.arm}_ee"
     solver = create_solver(
@@ -72,7 +88,7 @@ def main() -> None:
     )
     analyzer = WorkspaceAnalyzer(solver, config)
     reference_q = (
-        solver.joint_limits.mean(axis=1)
+        default_reference_joints(solver)
         if args.reference_joints is None
         else np.asarray(args.reference_joints, dtype=float)
     )
@@ -108,6 +124,8 @@ def main() -> None:
             sampling=config.sampling,
             position_only=not args.full_pose,
             restarts=args.ik_restarts,
+            rescue_restarts=args.ik_rescue_restarts,
+            rescue_rounds=args.ik_rescue_rounds,
             reference_pose=reference_pose,
             reference_joints=reference_q,
         )
@@ -145,8 +163,9 @@ def main() -> None:
             port=args.port,
             label=f"marvin_{args.arm}_arm",
             initial_q=reference_q,
+            load_full_robot=True,
         )
-        viewer.add_workspace(result)
+        viewer.add_workspace(result, color_metric=args.color_metric)
         if args.mode == "cartesian":
             viewer.configure_cartesian_recompute(analyzer, cartesian_config)
         viewer.wait()

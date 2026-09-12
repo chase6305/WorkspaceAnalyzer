@@ -1,0 +1,11 @@
+<robot name="continuous_arm">
+  <link name="base"/><link name="arm"/><link name="tcp"/>
+  <joint name="spin" type="continuous">
+    <parent link="base"/><child link="arm"/>
+    <axis xyz="0 0 1"/><limit velocity="1"/>
+  </joint>
+  <joint name="tool" type="fixed">
+    <parent link="arm"/><child link="tcp"/>
+    <origin xyz="1 0 0"/>
+  </joint>
+</robot>

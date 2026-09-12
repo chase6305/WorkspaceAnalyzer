@@ -23,7 +23,51 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[dev]'
-      - run: pytest -q
+      - run: python -m pytest -q -ra --junitxml=outputs/test-results.xml
+      - run: make test-workflow
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: core-python-${{ matrix.python-version }}
+          path: |
+            outputs/test-results.xml
+            outputs/test-workflow/report.*
+            outputs/test-workflow/stability/
+
+  optional:
+    name: Torch CPU, SciPy, and Viser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: python -m pip install -e '.[dev,sampling,viser]'
+      - name: Verify optional runtimes and local sockets
+        run: |
+          python - <<'PY'
+          import socket
+          import scipy
+          import torch
+          import trimesh
+          import viser
+          print("SciPy", scipy.__version__, "Torch", torch.__version__)
+          with socket.socket() as server:
+              server.bind(("127.0.0.1", 0))
+          PY
+      - run: python -m pytest -q -ra --junitxml=outputs/test-results.xml
+      - run: python examples/reachability_workflow.py --urdf tests/fixtures/cartesian_stage.urdf --backend torch --device cpu --robustness-test --boundary-test --stability-test --stability-initial-guesses 2 --candidate-diversity --select-ik-solutions joint_limit_margin --output-dir outputs/torch-workflow
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: optional-runtimes
+          path: |
+            outputs/test-results.xml
+            outputs/torch-workflow/report.*
+            outputs/torch-workflow/stability/
 
   quality:
     name: Lint and package

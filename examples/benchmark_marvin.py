@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import platform
 import time
 from pathlib import Path
 
 import numpy as np
 
 from workspace_analyzer import create_solver
+from workspace_analyzer.presets import default_robot_urdf, require_robot_urdf
 
-DEFAULT_URDF = Path(
-    "/home/ubuntu/workspace/chase/HumanoidAssets/Marvin_M6_S_CCS_696_V4.0/robot.urdf"
-)
+DEFAULT_URDF = default_robot_urdf()
 
 
 def _numpy(value):
@@ -32,8 +32,17 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--ik-targets", type=int, default=256)
     parser.add_argument("--restarts", type=int, default=4)
+    parser.add_argument("--rescue-restarts", type=int, default=0)
+    parser.add_argument("--rescue-rounds", type=int, default=1)
     parser.add_argument("--seed", type=int, default=12)
+    parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument("--warmup", type=int, default=1)
     args = parser.parse_args()
+    args.urdf = require_robot_urdf(args.urdf, parser)
+    if args.batch_size < 1 or args.ik_targets < 1:
+        parser.error("--batch-size and --ik-targets must be positive")
+    if args.repeats < 1 or args.warmup < 0:
+        parser.error("--repeats must be positive and --warmup must be non-negative")
 
     solver = create_solver(
         str(args.urdf),
@@ -47,23 +56,21 @@ def main() -> None:
     lower, upper = solver.joint_limits[:, 0], solver.joint_limits[:, 1]
     q = rng.uniform(lower, upper, (args.batch_size, solver.dof))
 
-    solver.forward(q)
-    solver.jacobian(q)
-    started = time.perf_counter()
-    solver.forward(q)
-    _synchronize(solver)
-    fk_seconds = time.perf_counter() - started
-    started = time.perf_counter()
-    solver.jacobian(q)
-    _synchronize(solver)
-    jacobian_seconds = time.perf_counter() - started
+    fk_seconds, _ = _measure(solver, lambda: solver.forward(q), args)
+    jacobian_seconds, _ = _measure(solver, lambda: solver.jacobian(q), args)
 
-    ik_q = q[: args.ik_targets]
+    ik_q = rng.uniform(lower, upper, (args.ik_targets, solver.dof))
     targets = solver.forward(ik_q)
-    started = time.perf_counter()
-    result = solver.inverse(targets, restarts=args.restarts)
-    _synchronize(solver)
-    ik_seconds = time.perf_counter() - started
+    ik_seconds, result = _measure(
+        solver,
+        lambda: solver.inverse(
+            targets,
+            restarts=args.restarts,
+            rescue_restarts=args.rescue_restarts,
+            rescue_rounds=args.rescue_rounds,
+        ),
+        args,
+    )
     residual = _numpy(result.residual)
     success = _numpy(result.success)
     report = {
@@ -73,6 +80,16 @@ def main() -> None:
         "backend": solver.backend,
         "device": solver.device,
         "dtype": args.dtype,
+        "environment": {
+            "platform": platform.platform(),
+            "processor": platform.processor(),
+            "python": platform.python_version(),
+            "numpy": np.__version__,
+        },
+        "seed": args.seed,
+        "repeats": args.repeats,
+        "warmup": args.warmup,
+        "timing_statistic": "median",
         "batch_size": args.batch_size,
         "fk_ms": fk_seconds * 1e3,
         "fk_poses_per_second": args.batch_size / fk_seconds,
@@ -80,12 +97,33 @@ def main() -> None:
         "jacobians_per_second": args.batch_size / jacobian_seconds,
         "ik_targets": args.ik_targets,
         "ik_restarts": args.restarts,
+        "ik_rescue_restarts": args.rescue_restarts,
+        "ik_rescue_rounds": args.rescue_rounds,
         "ik_ms": ik_seconds * 1e3,
         "ik_success_rate": float(np.mean(success)),
         "ik_residual_p95": float(np.percentile(residual, 95)),
         "ik_residual_max": float(np.max(residual)),
     }
+    if solver.backend == "torch":
+        import torch
+
+        report["environment"]["torch"] = torch.__version__
+        if solver.device.startswith("cuda"):
+            report["environment"]["gpu"] = torch.cuda.get_device_name(solver.device)
     print(json.dumps(report, indent=2))
+
+
+def _measure(solver, operation, args):
+    for _ in range(args.warmup):
+        operation()
+    durations = []
+    for _ in range(args.repeats):
+        _synchronize(solver)
+        started = time.perf_counter()
+        result = operation()
+        _synchronize(solver)
+        durations.append(time.perf_counter() - started)
+    return float(np.median(durations)), result
 
 
 def _synchronize(solver) -> None:

@@ -1,0 +1,20 @@
+<robot name="redundant_stage">
+  <link name="base"/><link name="x1"/><link name="x2"/>
+  <link name="y"/><link name="tcp"/>
+  <joint name="slide_x1" type="prismatic">
+    <parent link="base"/><child link="x1"/><axis xyz="1 0 0"/>
+    <limit lower="-1" upper="1"/>
+  </joint>
+  <joint name="slide_x2" type="prismatic">
+    <parent link="x1"/><child link="x2"/><axis xyz="1 0 0"/>
+    <limit lower="-1" upper="1"/>
+  </joint>
+  <joint name="slide_y" type="prismatic">
+    <parent link="x2"/><child link="y"/><axis xyz="0 1 0"/>
+    <limit lower="-1" upper="1"/>
+  </joint>
+  <joint name="slide_z" type="prismatic">
+    <parent link="y"/><child link="tcp"/><axis xyz="0 0 1"/>
+    <limit lower="-1" upper="1"/>
+  </joint>
+</robot>

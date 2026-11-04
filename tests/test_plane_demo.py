@@ -1,8 +1,11 @@
+import io
 import json
+import socket
 import subprocess
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -30,6 +33,21 @@ def _transform(rotation, translation):
     result[:3, :3] = rotation
     result[:3, 3] = translation
     return result
+
+
+@pytest.mark.parametrize("plane", ["xy", "xz", "yz"])
+@pytest.mark.parametrize("center,span", [((0, 0, 0), 5e-324), ((1e20,) * 3, 1)])
+def test_plane_rejects_span_that_collapses_in_sampling_precision(plane, center, span):
+    with pytest.raises(ValueError, match="span.*precision"):
+        PlaneConfig(plane=plane, center=center, span=span)
+
+
+@pytest.mark.parametrize("plane,normal", [("xy", 2), ("xz", 1), ("yz", 0)])
+def test_plane_fixed_normal_coordinate_does_not_limit_in_plane_precision(plane, normal):
+    center = np.zeros(3)
+    center[normal] = 1e20
+    config = PlaneConfig(plane=plane, center=center, span=1, resolution=3)
+    assert len(np.unique(config.points(), axis=0)) == 9
 
 
 @pytest.fixture
@@ -657,3 +675,375 @@ def test_tilted_plane_cli_preserves_geometry_and_export(entry, tmp_path):
     result = AnalysisResult.load(tmp_path / "result.npz")
     assert result.reachable.sum() == 15
     assert result.metadata["plane_scan"]["frame_rpy_rad"] == [np.pi / 4, 0, 0]
+
+
+@pytest.fixture
+def interactive_plane_viewer():
+    pytest.importorskip("viser")
+    from workspace_analyzer.visualization import ViserWorkspace
+
+    solver = create_solver(
+        Path(__file__).parent / "fixtures/cartesian_stage.urdf", backend="numpy"
+    )
+    try:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+    except PermissionError:
+        pytest.skip("the test environment does not allow local sockets")
+    with ViserWorkspace(solver, port=port, load_robot_visuals=False) as viewer:
+        viewer.configure_plane_recompute(
+            PlaneConfig(resolution=3, span=0.8),
+            ReachabilityConfig(restarts=1, rescue_restarts=0),
+        )
+        yield viewer
+
+
+def _complete_plane(viewer):
+    viewer.plane_panel.compute()
+    viewer._analysis_thread.join(timeout=5)
+    assert not viewer._analysis_thread.is_alive()
+    assert not viewer._recompute_running
+    return viewer.plane_panel.result
+
+
+@pytest.mark.parametrize("extension", ["svg", "npz"])
+@pytest.mark.parametrize("after_click", ["close", "new_result"])
+def test_plane_download_encodes_outside_lock_and_keeps_clicked_result(
+    interactive_plane_viewer, extension, after_click, monkeypatch
+):
+    import workspace_analyzer.plane_visualization as plane_view
+
+    viewer = interactive_plane_viewer
+    panel = viewer.plane_panel
+    original = _complete_plane(viewer)
+    entered, release = threading.Event(), threading.Event()
+    downloads, errors, encoded = [], [], []
+    real_encoder = plane_view.plane_svg if extension == "svg" else AnalysisResult.save
+
+    def encode(result, *args, **kwargs):
+        if extension == "npz" or kwargs.get("max_points") is None:
+            encoded.append(result)
+            entered.set()
+            assert release.wait(5)
+        return real_encoder(result, *args, **kwargs)
+
+    if extension == "svg":
+        monkeypatch.setattr(plane_view, "plane_svg", encode)
+    else:
+        monkeypatch.setattr(AnalysisResult, "save", encode)
+    event = SimpleNamespace(
+        client=SimpleNamespace(send_file_download=lambda *args: downloads.append(args))
+    )
+
+    def download():
+        try:
+            panel.download(event, extension)
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=download)
+    worker.start()
+    try:
+        assert entered.wait(3)
+        if after_click == "close":
+            viewer.close()
+            assert worker.is_alive()
+        else:
+            panel.resolution.value = 4
+            replacement = _complete_plane(viewer)
+            assert len(replacement.points) == 16
+            assert replacement is not original
+    finally:
+        release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert not errors
+    if after_click == "close":
+        assert not downloads
+    else:
+        assert len(downloads) == 1
+        filename, content = downloads[0]
+        assert filename == f"plane.{extension}"
+        if extension == "svg":
+            assert content.count(b"<circle ") == 9
+        else:
+            with np.load(io.BytesIO(content), allow_pickle=False) as archive:
+                np.testing.assert_array_equal(archive["points"], original.points)
+    viewer.close()
+    panel.download(event, extension)
+    assert encoded == [original]
+
+
+def test_plane_retry_serializes_same_path_exports_without_blocking_interaction(
+    interactive_plane_viewer, tmp_path, monkeypatch
+):
+    import workspace_analyzer.plane_visualization as plane_view
+
+    viewer = interactive_plane_viewer
+    panel = viewer.plane_panel
+    report_path = tmp_path / "plane.json"
+    panel.configure(
+        PlaneConfig(resolution=3, span=0.8),
+        ReachabilityConfig(restarts=1, rescue_restarts=0),
+        output=tmp_path / "plane.npz",
+        report=report_path,
+        plot=tmp_path / "plane.svg",
+    )
+    report_path.mkdir()
+    original = _complete_plane(viewer)
+    assert set(panel._saved_paths) == {"npz", "svg"}
+    assert set(panel._export_errors) == {"json"}
+    report_path.rmdir()
+    entered, release, interacted = (threading.Event() for _ in range(3))
+    real_writer = plane_view.save_result_artifacts
+    calls, errors = [], []
+
+    def write(result, paths, **kwargs):
+        calls.append((result, paths.copy()))
+        entered.set()
+        assert release.wait(5)
+        return real_writer(result, paths, **kwargs)
+
+    monkeypatch.setattr(plane_view, "save_result_artifacts", write)
+
+    def retry():
+        try:
+            panel.retry_exports()
+        except BaseException as exc:
+            errors.append(exc)
+
+    def move_joint():
+        viewer._sliders[0].value = 0.35
+        interacted.set()
+
+    worker = threading.Thread(target=retry)
+    worker.start()
+    interaction = threading.Thread(target=move_joint)
+    try:
+        assert entered.wait(3)
+        interaction.start()
+        assert interacted.wait(1)
+        assert viewer._q[0] == 0.35
+        assert panel._export_running and panel.compute_button.disabled
+        panel.center.value = (0.2, 0, 0)
+        panel.compute()
+        panel.retry_exports()
+        assert len(calls) == 1
+        assert panel.result is original
+        assert calls[0][1] == {"json": report_path}
+    finally:
+        release.set()
+        worker.join(timeout=5)
+        if interaction.ident is not None:
+            interaction.join(timeout=3)
+    assert not worker.is_alive() and not errors
+    assert not panel._export_running
+    assert not panel.compute_button.disabled
+    assert panel.retry_save.disabled
+    assert json.loads(report_path.read_text())["plane_center"] == [0, 0, 0]
+    replacement = _complete_plane(viewer)
+    assert replacement is not original
+    assert len(calls) == 2
+    assert json.loads(report_path.read_text())["plane_center"] == [0.2, 0, 0]
+    np.testing.assert_array_equal(
+        AnalysisResult.load(tmp_path / "plane.npz").points, replacement.points
+    )
+
+
+@pytest.mark.parametrize("finishes_first", ["retry", "cartesian"])
+def test_plane_buttons_recover_after_retry_overlaps_cartesian(
+    interactive_plane_viewer, tmp_path, monkeypatch, finishes_first
+):
+    import workspace_analyzer.plane_visualization as plane_view
+    from workspace_analyzer import CartesianConfig
+
+    viewer = interactive_plane_viewer
+    panel = viewer.plane_panel
+    report = tmp_path / "plane.json"
+    panel.configure(
+        PlaneConfig(resolution=3),
+        ReachabilityConfig(restarts=1, rescue_restarts=0),
+        report=report,
+    )
+    report.mkdir()
+    original = _complete_plane(viewer)
+    assert set(panel._export_errors) == {"json"}
+    entered = {name: threading.Event() for name in ("retry", "cartesian")}
+    release = {name: threading.Event() for name in entered}
+    writer = plane_view.save_result_artifacts
+
+    def write(*args, **kwargs):
+        entered["retry"].set()
+        assert release["retry"].wait(5)
+        return writer(*args, **kwargs)
+
+    def analyze(*args, **kwargs):
+        entered["cartesian"].set()
+        assert release["cartesian"].wait(5)
+        return original
+
+    viewer.configure_cartesian_recompute(
+        SimpleNamespace(analyze_cartesian=analyze),
+        CartesianConfig(bounds=np.array([[-1, 1]] * 3)),
+    )
+    monkeypatch.setattr(plane_view, "save_result_artifacts", write)
+    errors = []
+
+    def retry():
+        try:
+            panel.retry_exports()
+        except BaseException as exc:
+            errors.append(exc)
+
+    workers = {"retry": threading.Thread(target=retry)}
+    try:
+        workers["retry"].start()
+        assert entered["retry"].wait(3)
+        viewer.recompute_cartesian_async()
+        workers["cartesian"] = viewer._analysis_thread
+        assert entered["cartesian"].wait(3)
+        release[finishes_first].set()
+        workers[finishes_first].join(timeout=5)
+        assert not workers[finishes_first].is_alive()
+        assert panel.compute_button.disabled and panel.retry_save.disabled
+        finishes_last = "cartesian" if finishes_first == "retry" else "retry"
+        release[finishes_last].set()
+        workers[finishes_last].join(timeout=5)
+        assert not workers[finishes_last].is_alive()
+    finally:
+        for event in release.values():
+            event.set()
+        for worker in workers.values():
+            if worker.ident is not None:
+                worker.join(timeout=5)
+    assert not errors
+    assert not viewer._recompute_running and not panel._export_running
+    assert not panel.compute_button.disabled
+    assert not panel.retry_save.disabled
+    assert set(panel._export_errors) == {"json"}
+
+
+def test_plane_automatic_export_allows_close_and_retains_partial_files(
+    interactive_plane_viewer, tmp_path, monkeypatch
+):
+    import workspace_analyzer.result_export as result_export
+
+    viewer = interactive_plane_viewer
+    panel = viewer.plane_panel
+    report_path = tmp_path / "plane.json"
+    panel.configure(
+        PlaneConfig(resolution=3, span=0.8),
+        ReachabilityConfig(restarts=1, rescue_restarts=0),
+        output=tmp_path / "plane.npz",
+        report=report_path,
+        plot=tmp_path / "plane.svg",
+    )
+    entered, release, closed = (threading.Event() for _ in range(3))
+    real_write = result_export.atomic_write_text
+
+    def write(path, content):
+        entered.set()
+        assert release.wait(5)
+        return real_write(path, content)
+
+    monkeypatch.setattr(result_export, "atomic_write_text", write)
+
+    def close():
+        viewer.close()
+        closed.set()
+
+    panel.compute()
+    closer = threading.Thread(target=close)
+    try:
+        assert entered.wait(3)
+        completed = panel.result
+        assert completed is not None
+        assert (tmp_path / "plane.npz").is_file()
+        assert panel._export_running
+        assert "Saving last completed run" in panel.export_info.content
+        assert panel.cancel_button.disabled
+        before_cancel = panel.info.content
+        panel.cancel()
+        assert panel.info.content == before_cancel
+        assert "Complete: 9/9" in panel.info.content
+        closer.start()
+        assert closed.wait(2)
+        assert viewer._analysis_thread.is_alive()
+        frozen_info = panel.info.content, panel.export_info.content
+        panel.cancel()
+        assert (panel.info.content, panel.export_info.content) == frozen_info
+    finally:
+        release.set()
+        viewer._analysis_thread.join(timeout=5)
+        if closer.ident is not None:
+            closer.join(timeout=3)
+    assert not panel._export_running and not viewer._recompute_running
+    assert panel.result is completed
+    assert (panel.info.content, panel.export_info.content) == frozen_info
+    for name in ("plane.npz", "plane.json", "plane.svg"):
+        assert (tmp_path / name).is_file()
+
+
+@pytest.mark.parametrize("during_retry", [False, True])
+def test_plane_writer_failure_restores_controls_and_completed_result(
+    interactive_plane_viewer, tmp_path, monkeypatch, during_retry
+):
+    import workspace_analyzer.plane_visualization as plane_view
+
+    viewer = interactive_plane_viewer
+    panel = viewer.plane_panel
+    panel.configure(
+        PlaneConfig(resolution=3, span=0.8),
+        ReachabilityConfig(restarts=1, rescue_restarts=0),
+        output=tmp_path / "plane.npz",
+    )
+    real_writer = plane_view.save_result_artifacts
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("writer unavailable")
+
+    monkeypatch.setattr(plane_view, "save_result_artifacts", fail)
+    completed = _complete_plane(viewer)
+    if during_retry:
+        panel.retry_exports()
+    assert panel.result is completed
+    assert "Complete: 9/9" in panel.info.content
+    assert "Save failed" in panel.export_info.content
+    assert "writer unavailable" in panel.export_info.content
+    assert not panel._export_running
+    assert not panel.compute_button.disabled
+    assert not panel.retry_save.disabled
+    monkeypatch.setattr(plane_view, "save_result_artifacts", real_writer)
+    monkeypatch.setattr(
+        plane_view, "analyze_plane", lambda *args, **kwargs: pytest.fail("retry ran IK")
+    )
+    panel.retry_exports()
+    assert panel.retry_save.disabled
+    np.testing.assert_array_equal(
+        AnalysisResult.load(tmp_path / "plane.npz").points, completed.points
+    )
+
+
+def test_plane_retry_interruption_clears_busy_state(
+    interactive_plane_viewer, monkeypatch
+):
+    import workspace_analyzer.plane_visualization as plane_view
+
+    viewer = interactive_plane_viewer
+    panel = viewer.plane_panel
+    completed = _complete_plane(viewer)
+    panel._export_paths = {"npz": Path("unused.npz")}
+    panel._export_errors = {"npz": "previous failure"}
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(plane_view, "save_result_artifacts", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        panel.retry_exports()
+    assert panel.result is completed
+    assert not panel._export_running
+    assert not panel.compute_button.disabled
+    assert not panel.retry_save.disabled
+    assert panel._export_errors == {"npz": "previous failure"}

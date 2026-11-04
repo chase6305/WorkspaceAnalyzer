@@ -402,3 +402,36 @@ def test_real_array_conversion_retains_independent_contiguous_storage():
     assert converted.flags.c_contiguous
     assert not np.shares_memory(source, converted)
     np.testing.assert_array_equal(converted, source)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_torch_assessment_keeps_solved_configurations_on_device(
+    device, dtype, monkeypatch
+):
+    torch = pytest.importorskip("torch")
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA device is unavailable")
+    solver = create_solver(
+        FIXTURES / "cartesian_stage.urdf",
+        backend="torch",
+        device=device,
+        dtype=dtype,
+        max_iterations=40,
+    )
+    validate = solver._configuration_array
+
+    def require_backend_configuration(configurations):
+        # Follow-up FK and quality must not upload the saved NumPy copy of IK.
+        assert isinstance(configurations, torch.Tensor)
+        assert configurations.device.type == device
+        return validate(configurations)
+
+    monkeypatch.setattr(solver, "_configuration_array", require_backend_configuration)
+    result = WorkspaceAnalyzer(solver).analyze_targets(
+        [[0.2, -0.3, 0.4], [2, 0, 0], [-0.1, 0.2, 0.3], [0, 3, 0]],
+        _config(),
+    )
+    np.testing.assert_array_equal(result.reachable, [True, False, True, False])
+    np.testing.assert_allclose(result.metrics["isotropy"][[0, 2]], 1)
+    assert result.joint_positions.dtype == np.dtype(dtype)

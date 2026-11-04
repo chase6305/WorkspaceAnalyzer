@@ -102,6 +102,54 @@ def test_cli_invalid_input_has_concise_error(args, message, capsys):
     assert "Traceback" not in stderr
 
 
+def _viewer_entry(entry, tmp_path):
+    if entry == "demo":
+        import runpy
+
+        example = Path(__file__).parents[1] / "examples/plane_reachability.py"
+        run = runpy.run_path(str(example))["main"]
+        args = ["--urdf", str(URDF)]
+    else:
+        run = main
+        args = [str(URDF), "--mode", entry]
+    return run, [*args, "--output", str(tmp_path / "result.npz")]
+
+
+@pytest.mark.parametrize("entry", ["joint", "plane", "demo"])
+@pytest.mark.parametrize("port", [-1, 65536])
+def test_cli_rejects_viewer_port_before_loading_robot(
+    entry, port, tmp_path, monkeypatch, capsys
+):
+    import workspace_analyzer.cli as cli
+    from workspace_analyzer import RobotModel
+
+    run, args = _viewer_entry(entry, tmp_path)
+    monkeypatch.setattr(
+        cli, "create_solver", lambda *a, **k: pytest.fail("started solver")
+    )
+    monkeypatch.setattr(
+        RobotModel, "from_urdf", lambda *a, **k: pytest.fail("loaded URDF")
+    )
+    with pytest.raises(SystemExit) as error:
+        run([*args, "--viser", "--port", str(port)])
+    assert error.value.code == 2
+    stderr = capsys.readouterr().err
+    assert "port must be an integer between 0 and 65535" in stderr
+    assert "Traceback" not in stderr
+
+
+@pytest.mark.parametrize("entry", ["joint", "plane", "demo"])
+@pytest.mark.parametrize("port,viser", [(0, True), (65535, True), (65536, False)])
+def test_cli_accepts_valid_viewer_ports_and_ignores_unused_port(
+    entry, port, viser, tmp_path, monkeypatch
+):
+    import workspace_analyzer.cli as cli
+
+    run, args = _viewer_entry(entry, tmp_path)
+    monkeypatch.setattr(cli, "_run", lambda parser, parsed: parsed.port)
+    assert run([*args, *(["--viser"] if viser else []), "--port", str(port)]) == port
+
+
 @pytest.mark.parametrize("extension", ["npy", "npz", "csv"])
 def test_target_cli_writes_quality_report_and_result(extension, tmp_path, capsys):
     targets = np.array([[0, 0, 0], [0.95, 0, 0], [2, 0, 0]])

@@ -56,8 +56,12 @@ class PlaneConfig:
             raise ValueError("constant must be finite")
         if self.sampling is not None and not isinstance(self.sampling, SamplingConfig):
             raise ValueError("sampling must be a SamplingConfig")
-        if not np.isfinite(self.bounds).all():
+        bounds = self.bounds
+        if not np.isfinite(bounds).all():
             raise ValueError("plane bounds must remain finite")
+        plane_bounds = bounds[list(PLANE_AXES[self.plane][:2])]
+        if np.any(plane_bounds[:, 0] >= plane_bounds[:, 1]):
+            raise ValueError("span is too small for the plane center's precision")
 
     @property
     def effective_center(self):

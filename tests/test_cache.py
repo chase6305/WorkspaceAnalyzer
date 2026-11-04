@@ -79,6 +79,42 @@ def test_cache_key_tracks_loaded_model_instead_of_changed_source(tmp_path):
     assert analysis_cache_key(new_solver, "joint", config) == changed_key
 
 
+@pytest.mark.parametrize("mutation", ["axis", "origin"])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize(
+    "backend,device", [("numpy", "cpu"), ("torch", "cpu"), ("torch", "cuda")]
+)
+def test_cache_distinguishes_compiled_geometry_after_shared_model_mutation(
+    tmp_path, mutation, dtype, backend, device
+):
+    if backend == "torch":
+        torch = pytest.importorskip("torch")
+        if device == "cuda" and not torch.cuda.is_available():
+            pytest.skip("CUDA device is unavailable")
+    model = RobotModel.from_urdf(URDF)
+    runtime = SolverConfig(backend=backend, device=device, dtype=dtype)
+    old_solver = KinematicsSolver(model, config=runtime)
+    if mutation == "axis":
+        model.joints[0].axis[:] = [1, 0, 0]
+    else:
+        model.joints[0].origin[:3, 3] = [0.4, -0.3, 0.2]
+    new_solver = KinematicsSolver(model, config=runtime)
+    config = WorkspaceConfig(SamplingConfig(num_samples=8, seed=3), False)
+    assert analysis_cache_key(old_solver, "joint", config) != analysis_cache_key(
+        new_solver, "joint", config
+    )
+
+    cache = ResultCache(tmp_path)
+    original = WorkspaceAnalyzer(old_solver, config).analyze(cache=cache)
+    updated = WorkspaceAnalyzer(new_solver, config).analyze(cache=cache)
+    assert not original.metadata["cache_hit"]
+    assert not updated.metadata["cache_hit"]
+    assert not np.allclose(original.points, updated.points)
+    replay = WorkspaceAnalyzer(new_solver, config).analyze(cache=cache)
+    assert replay.metadata["cache_hit"]
+    np.testing.assert_array_equal(replay.points, updated.points)
+
+
 @pytest.mark.parametrize("metadata", ["null", "[]", '"text"'])
 def test_cache_with_invalid_metadata_is_a_miss(tmp_path, metadata):
     analyzer = _analyzer()

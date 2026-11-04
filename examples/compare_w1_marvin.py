@@ -12,6 +12,7 @@ from workspace_analyzer import AnalysisResult, create_solver
 from workspace_analyzer._arrays import as_numpy as _numpy
 from workspace_analyzer._atomic import atomic_write_text
 from workspace_analyzer._output_paths import validate_output_paths
+from workspace_analyzer.metrics import _dexterity_from_jacobian
 from workspace_analyzer.model import _rpy_matrix
 from workspace_analyzer.presets import (
     default_reference_joints,
@@ -375,9 +376,11 @@ def _analyze(
     aligned_arm_length=None,
 ) -> AnalysisResult:
     lower, upper = solver.joint_limits.T
-    q = lower + unit_q * (upper - lower)
-    poses = _numpy(solver.forward(q))
-    quality = solver.dexterity(q)
+    joint_positions = lower + unit_q * (upper - lower)
+    configuration = solver._configuration_array(joint_positions)
+    poses, jacobian = solver.forward_with_jacobian(configuration)
+    poses = _numpy(poses)
+    quality = _dexterity_from_jacobian(solver, configuration, jacobian, task="position")
     neutral = solver.model.zero_transforms()
     world_from_base = neutral[solver.base_link]
     reference_link = _active_reference_link(solver, reference_link_index)
@@ -392,7 +395,7 @@ def _analyze(
     )
     return AnalysisResult(
         points=poses[:, :3, 3],
-        joint_positions=q,
+        joint_positions=joint_positions,
         manipulability=_numpy(quality.manipulability),
         metrics={
             "minimum_singular_value": _numpy(quality.minimum_singular_value),
@@ -401,7 +404,7 @@ def _analyze(
         },
         metadata={
             "robot": solver.model.name,
-            "samples": len(q),
+            "samples": len(joint_positions),
             "mode": "comparison",
             "comparison_frame": "parallel_world_axes_at_structural_link2",
             "world_from_solver_base": world_from_base.tolist(),
@@ -429,7 +432,10 @@ def _robot_report(
         urdf_arm_length if arm_length_override is None else float(arm_length_override)
     )
     coordinate_length = result.metadata.get("aligned_arm_length") or arm_length
-    hull_volume = _convex_hull_volume(canonical_points)
+    hull_convergence = _convex_hull_convergence(canonical_points)
+    hull_volume = hull_convergence["volumes"][-1]
+    maximum_radius = float(np.max(np.linalg.norm(canonical_points, axis=1)))
+    aabb_volume = float(np.prod(xyz_max - xyz_min))
     return {
         "name": solver.model.name,
         "dof": solver.dof,
@@ -444,24 +450,18 @@ def _robot_report(
         ),
         "reference_link": result.metadata["reference_link"],
         "cartesian_coordinate_scale": result.metadata["coordinate_scale"],
-        "maximum_sampled_radius": float(
-            np.max(np.linalg.norm(canonical_points, axis=1))
-        ),
-        "normalized_maximum_sampled_radius": float(
-            np.max(np.linalg.norm(canonical_points, axis=1)) / coordinate_length
-        ),
+        "maximum_sampled_radius": maximum_radius,
+        "normalized_maximum_sampled_radius": maximum_radius / coordinate_length,
         "reference_base_frame_xyz_min": xyz_min.tolist(),
         "reference_base_frame_xyz_max": xyz_max.tolist(),
         "reference_base_frame_xyz_extent": (xyz_max - xyz_min).tolist(),
-        "reference_base_frame_aabb_volume": float(np.prod(xyz_max - xyz_min)),
+        "reference_base_frame_aabb_volume": aabb_volume,
         "reference_base_frame_convex_hull_volume": hull_volume,
-        "normalized_aabb_volume": float(
-            np.prod(xyz_max - xyz_min) / coordinate_length**3
-        ),
+        "normalized_aabb_volume": aabb_volume / coordinate_length**3,
         "normalized_convex_hull_volume": (
             None if hull_volume is None else float(hull_volume / coordinate_length**3)
         ),
-        "convex_hull_convergence": _convex_hull_convergence(canonical_points),
+        "convex_hull_convergence": hull_convergence,
         "metrics": {name: _percentiles(values) for name, values in metrics.items()},
         "normalized_metrics": {
             "manipulability_over_length_cubed": _percentiles(
@@ -505,8 +505,8 @@ def _active_reference_link(solver, reference_link_index):
 
 
 def _occupancy_comparison(point_sets, resolution):
-    all_points = np.concatenate(list(point_sets.values()))
-    lower, upper = all_points.min(0), all_points.max(0)
+    lower = np.minimum.reduce([points.min(0) for points in point_sets.values()])
+    upper = np.maximum.reduce([points.max(0) for points in point_sets.values()])
     cell = np.maximum((upper - lower) / resolution, 1e-12)
     occupied = {}
     for name, points in point_sets.items():
@@ -516,14 +516,15 @@ def _occupancy_comparison(point_sets, resolution):
     first, second = occupied.values()
     voxel_volume = float(np.prod(cell))
     union = first | second
+    intersection = first & second
     return {
         "resolution": resolution,
         "voxel_volume": voxel_volume,
         "occupied_volume": {
             name: len(values) * voxel_volume for name, values in occupied.items()
         },
-        "intersection_volume": len(first & second) * voxel_volume,
-        "overlap_jaccard": len(first & second) / max(len(union), 1),
+        "intersection_volume": len(intersection) * voxel_volume,
+        "overlap_jaccard": len(intersection) / max(len(union), 1),
     }
 
 
@@ -646,11 +647,16 @@ def _circle_perturbation_cases(center, radius, target_rpy, args):
             offset = center.copy()
             offset[axis] += sign * delta
             cases.append((f"center_{label}_{suffix}", offset, radius, target_rpy))
-    dr = radius * float(args.robustness_radius_fraction)
+    radius_delta = radius * float(args.robustness_radius_fraction)
     cases.extend(
         [
-            ("radius_minus", center, max(radius - dr, radius * 0.01), target_rpy),
-            ("radius_plus", center, radius + dr, target_rpy),
+            (
+                "radius_minus",
+                center,
+                max(radius - radius_delta, radius * 0.01),
+                target_rpy,
+            ),
+            ("radius_plus", center, radius + radius_delta, target_rpy),
         ]
     )
     if args.orientation_mode != "position-only":
@@ -691,22 +697,24 @@ def _circle_robustness(solvers, analyses, center, args, ik_settings):
     aggregate = {}
     for name, entries in results.items():
 
-        def vals(key):
-            return [float(e[key]) for e in entries if e.get(key) is not None]
+        def metric_values(key):
+            return [
+                float(entry[key]) for entry in entries if entry.get(key) is not None
+            ]
 
-        success = [float(e.get("success_rate", 0.0)) for e in entries]
+        success = [float(entry.get("success_rate", 0.0)) for entry in entries]
         aggregate[name] = {
             "cases": len(entries),
             "cases_with_100_percent_success": sum(v >= 1.0 for v in success),
             "worst_success_rate": min(success) if success else None,
             "maximum_joint_jump_across_cases": max(
-                vals("max_joint_jump"), default=None
+                metric_values("max_joint_jump"), default=None
             ),
             "minimum_singular_value_across_cases": min(
-                vals("minimum_singular_value"), default=None
+                metric_values("minimum_singular_value"), default=None
             ),
             "minimum_joint_limit_margin_across_cases": min(
-                vals("minimum_joint_limit_margin"), default=None
+                metric_values("minimum_joint_limit_margin"), default=None
             ),
             "case_results": entries,
         }
@@ -806,15 +814,14 @@ def _comparison_markdown(report):
     ]["median"]
     scale_label = "link2 equal-length virtual" if aligned else "original physical"
     interpretation = (
-        "After link2 length alignment, W1 has slightly greater workspace envelope, "
-        "normalized manipulability, isotropy, and fixed-orientation reachability; "
-        "Marvin's principal advantage is longer physical reach."
+        "Workspace coordinates are scaled to one nominal arm length. "
+        "Use the physical arm lengths alongside these virtual workspace measures."
         if aligned
-        else "At original scale, Marvin emphasizes absolute workspace and aggregate "
-        "manipulability; W1 has more directionally balanced median dexterity."
+        else "Workspace coordinates retain each URDF's physical scale. "
+        "Length-normalized metrics allow a separate comparison of geometry."
     )
     return (
-        "## W1 versus Marvin M6 conclusions\n"
+        "## W1 versus Marvin M6 comparison\n"
         "| Metric | Dexforce W1 | Marvin M6 |\n"
         "|---|---:|---:|\n"
         "| Convex-hull volume | "
@@ -989,7 +996,10 @@ def _convex_hull_convergence(points):
     counts = [
         min(len(points), max(4, int(round(len(points) * value)))) for value in fractions
     ]
-    volumes = [_convex_hull_volume(points[:count]) for count in counts]
+    volumes_by_count = {
+        count: _convex_hull_volume(points[:count]) for count in dict.fromkeys(counts)
+    }
+    volumes = [volumes_by_count[count] for count in counts]
     final = volumes[-1]
     return {
         "sample_counts": counts,
@@ -1017,34 +1027,43 @@ def _relative_summary(report):
     w1 = report["robots"]["dexforce_w1"]
     marvin = report["robots"]["marvin_m6"]
 
-    def ratio(key):
-        return marvin[key] / w1[key]
+    def ratio(numerator, denominator):
+        if numerator is None or denominator in (None, 0):
+            return None
+        return numerator / denominator
 
     return {
-        "aabb_volume_ratio": ratio("reference_base_frame_aabb_volume"),
-        "convex_hull_volume_ratio": (
-            None
-            if w1["reference_base_frame_convex_hull_volume"] is None
-            else ratio("reference_base_frame_convex_hull_volume")
+        "aabb_volume_ratio": ratio(
+            marvin["reference_base_frame_aabb_volume"],
+            w1["reference_base_frame_aabb_volume"],
         ),
-        "urdf_effective_arm_length_ratio": ratio("urdf_effective_arm_length"),
-        "normalization_arm_length_ratio": ratio("normalization_arm_length"),
-        "normalized_convex_hull_volume_ratio": ratio("normalized_convex_hull_volume"),
-        "manipulability_median_ratio": (
-            marvin["metrics"]["manipulability"]["median"]
-            / w1["metrics"]["manipulability"]["median"]
+        "convex_hull_volume_ratio": ratio(
+            marvin["reference_base_frame_convex_hull_volume"],
+            w1["reference_base_frame_convex_hull_volume"],
         ),
-        "normalized_manipulability_median_ratio": (
-            marvin["normalized_metrics"]["manipulability_over_length_cubed"]["median"]
-            / w1["normalized_metrics"]["manipulability_over_length_cubed"]["median"]
+        "urdf_effective_arm_length_ratio": ratio(
+            marvin["urdf_effective_arm_length"], w1["urdf_effective_arm_length"]
         ),
-        "minimum_singular_value_median_ratio": (
-            marvin["metrics"]["minimum_singular_value"]["median"]
-            / w1["metrics"]["minimum_singular_value"]["median"]
+        "normalization_arm_length_ratio": ratio(
+            marvin["normalization_arm_length"], w1["normalization_arm_length"]
         ),
-        "isotropy_median_ratio": (
-            marvin["metrics"]["isotropy"]["median"]
-            / w1["metrics"]["isotropy"]["median"]
+        "normalized_convex_hull_volume_ratio": ratio(
+            marvin["normalized_convex_hull_volume"], w1["normalized_convex_hull_volume"]
+        ),
+        "manipulability_median_ratio": ratio(
+            marvin["metrics"]["manipulability"]["median"],
+            w1["metrics"]["manipulability"]["median"],
+        ),
+        "normalized_manipulability_median_ratio": ratio(
+            marvin["normalized_metrics"]["manipulability_over_length_cubed"]["median"],
+            w1["normalized_metrics"]["manipulability_over_length_cubed"]["median"],
+        ),
+        "minimum_singular_value_median_ratio": ratio(
+            marvin["metrics"]["minimum_singular_value"]["median"],
+            w1["metrics"]["minimum_singular_value"]["median"],
+        ),
+        "isotropy_median_ratio": ratio(
+            marvin["metrics"]["isotropy"]["median"], w1["metrics"]["isotropy"]["median"]
         ),
         "shared_target_success_rate_difference": (
             report["shared_position_targets"]["marvin_m6"]["success_rate"]

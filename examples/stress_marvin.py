@@ -83,6 +83,7 @@ def _run(args, parser):
     batches = poses_checked = ik_total = ik_success = 0
     max_rotation_error = max_jacobian_error = max_success_residual = 0.0
     max_angular_jacobian_error = max_fk_position_error = 0.0
+    max_fk_rotation_error = max_fk_residual = 0.0
     max_joint_limit_violation = 0.0
     jacobian_columns_checked = set()
     next_progress = started + 30
@@ -159,15 +160,23 @@ def _run(args, parser):
         )
         if np.any(success):
             achieved = _numpy(solver.forward(positions[success]))
+            position_error = np.linalg.norm(
+                achieved[:, :3, 3] - targets[success, :3, 3], axis=1
+            )
+            # ||R1-R2||_F / sqrt(2) = 2*sin(angle/2), matching the IK
+            # quaternion residual without reusing the solver's error kernel.
+            rotation_chord = np.linalg.norm(
+                achieved[:, :3, :3] - targets[success, :3, :3], axis=(1, 2)
+            ) / np.sqrt(2)
             max_fk_position_error = max(
-                max_fk_position_error,
-                float(
-                    np.max(
-                        np.linalg.norm(
-                            achieved[:, :3, 3] - targets[success, :3, 3], axis=1
-                        )
-                    )
-                ),
+                max_fk_position_error, float(np.max(position_error))
+            )
+            max_fk_rotation_error = max(
+                max_fk_rotation_error,
+                float(np.max(2 * np.arcsin(np.clip(rotation_chord / 2, 0, 1)))),
+            )
+            max_fk_residual = max(
+                max_fk_residual, float(np.max(np.hypot(position_error, rotation_chord)))
             )
         ik_total += count
         ik_success += int(np.count_nonzero(success))
@@ -233,6 +242,8 @@ def _run(args, parser):
         "max_angular_jacobian_error": max_angular_jacobian_error,
         "jacobian_columns_checked": sorted(jacobian_columns_checked),
         "max_success_fk_position_error": max_fk_position_error,
+        "max_success_fk_rotation_error_rad": max_fk_rotation_error,
+        "max_success_fk_residual": max_fk_residual,
         "max_joint_limit_violation": max_joint_limit_violation,
     }
     text = json.dumps(report, indent=2, allow_nan=False)
@@ -245,7 +256,7 @@ def _run(args, parser):
         max_rotation_error > 1e-10
         or max_jacobian_error > 1e-6
         or max_angular_jacobian_error > 1e-6
-        or max_fk_position_error > solver.config.tolerance
+        or max_fk_residual > solver.config.tolerance
         or max_joint_limit_violation > 1e-12
     ):
         raise SystemExit("numerical accuracy threshold exceeded")

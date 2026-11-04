@@ -132,6 +132,53 @@ def test_inspect_empty_result_uses_null_bounds_and_rate(tmp_path, capsys):
     )
 
 
+def test_inspect_summary_encoding_failure_keeps_other_diagnostics(
+    measured, tmp_path, capsys
+):
+    source, result = measured
+    result.metadata["external_measurement"] = float("nan")
+    result.save(source)
+    output, report, plot = (
+        tmp_path / "diagnostics.npz",
+        tmp_path / "summary.json",
+        tmp_path / "samples.svg",
+    )
+    report.write_text("previous completed report")
+    with pytest.raises(SystemExit) as error:
+        main(
+            [
+                "inspect",
+                str(source),
+                "--output",
+                str(output),
+                "--report",
+                str(report),
+                "--plot",
+                str(plot),
+            ]
+        )
+    assert error.value.code == 2
+    captured = capsys.readouterr()
+    assert "summary" in captured.err and "saved:" in captured.err
+    assert str(output) in captured.err and str(plot) in captured.err
+    assert captured.out == ""
+    assert report.read_text() == "previous completed report"
+    np.testing.assert_array_equal(AnalysisResult.load(output).points, result.points)
+    assert plot.read_text().count("<circle ") == len(result.points)
+
+
+def test_inspect_symlink_loop_has_clean_error(measured, tmp_path, capsys):
+    source, _ = measured
+    output = tmp_path / "loop.npz"
+    output.symlink_to(output.name)
+    with pytest.raises(SystemExit) as error:
+        main(["inspect", str(source), "--output", str(output)])
+    assert error.value.code == 2
+    message = capsys.readouterr().err
+    assert "artifact path" in message and "loop.npz" in message
+    assert "Traceback" not in message
+
+
 @pytest.mark.parametrize("failed", ["npz", "json", "svg"])
 def test_inspect_attempts_other_exports_after_one_failure(
     measured, tmp_path, failed, capsys

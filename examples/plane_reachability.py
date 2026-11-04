@@ -7,6 +7,7 @@ With --viser, select settings in the browser and click Compute plane reachabilit
 from pathlib import Path
 
 from workspace_analyzer import KinematicsSolver, RobotModel, SolverConfig
+from workspace_analyzer._validation import require_port
 from workspace_analyzer.cli import build_parser, entrypoint, run_arguments
 from workspace_analyzer.presets import (
     default_reference_joints,
@@ -23,8 +24,10 @@ def main(argv=None):
     output = Path(args.output)
     if output.suffix.lower() not in {".json", ".npz"}:
         parser.error("--output must end in .json or .npz; both files are written")
-    args.urdf = require_robot_urdf(args.urdf, parser)
     try:
+        if args.viser:
+            require_port(args.port)
+        args.urdf = require_robot_urdf(args.urdf, parser)
         model = RobotModel.from_urdf(args.urdf)
         args.base_link, args.tip_link = select_arm_links(
             model, args.arm, args.base_link, args.tip_link

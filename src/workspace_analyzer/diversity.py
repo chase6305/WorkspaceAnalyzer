@@ -122,20 +122,17 @@ def summarize_ik_diversity(study, config=None, *, joint_kinds=None, cancel_event
             rows = np.flatnonzero(remaining & (labels[prior] == prior))
             if not len(rows):
                 continue
-            current = result.joint_positions[rows].astype(np.float64, copy=False)
-            reference = (
-                study.results[prior]
-                .joint_positions[rows]
-                .astype(np.float64, copy=False)
-            )
+            current = result.joint_positions[rows]
+            reference = study.results[prior].joint_positions[rows]
             # Very distant finite coordinates can overflow subtraction; inf is
             # correctly outside tolerance. Periodic subtraction stays bounded.
             with np.errstate(over="ignore"):
-                distance = np.abs(current - reference)
+                distance = np.subtract(current, reference, dtype=np.float64)
+            np.abs(distance, out=distance)
             if has_periodic:
                 wrapped = np.abs(
-                    np.remainder(current[:, periodic], 2 * np.pi)
-                    - np.remainder(reference[:, periodic], 2 * np.pi)
+                    np.remainder(current[:, periodic], 2 * np.pi, dtype=np.float64)
+                    - np.remainder(reference[:, periodic], 2 * np.pi, dtype=np.float64)
                 )
                 distance[:, periodic] = np.minimum(wrapped, 2 * np.pi - wrapped)
             matched = rows[np.all(distance <= tolerances, axis=1)]

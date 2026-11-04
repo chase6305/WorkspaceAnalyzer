@@ -1,4 +1,5 @@
 import threading
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +18,115 @@ from workspace_analyzer import (
 from workspace_analyzer.kinematics import _quaternion_rotation_error, _select_best
 
 URDF = Path(__file__).parent / "fixtures/two_link.urdf"
+
+
+@pytest.mark.parametrize("backend", ["numpy", "torch"])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("container", ["array", "list"])
+@pytest.mark.parametrize("imaginary", [0, 0.5])
+def test_complex_kinematic_inputs_are_rejected_before_cast(
+    backend, dtype, container, imaginary
+):
+    if backend == "torch":
+        pytest.importorskip("torch")
+    solver = KinematicsSolver(
+        RobotModel.from_urdf(URDF), config=SolverConfig(backend=backend, dtype=dtype)
+    )
+    configuration = np.array([0.3 + imaginary * 1j, 0.7])
+    target = np.eye(4, dtype=complex)
+    target[0, 3] = imaginary * 1j
+    if container == "list":
+        configuration, target = configuration.tolist(), target.tolist()
+    # Even zero-imaginary complex values must not silently cast to real inputs.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        for operation in ("forward", "jacobian", "forward_with_jacobian", "dexterity"):
+            with pytest.raises(ValueError, match="real values"):
+                getattr(solver, operation)(configuration)
+        for arguments in (
+            {"target": target},
+            {"target": np.eye(4), "seed": configuration},
+            {
+                "target": np.eye(4),
+                "posture_reference": configuration,
+                "posture_gain": 0.1,
+            },
+        ):
+            with pytest.raises(ValueError, match="real values"):
+                solver.inverse(**arguments)
+
+
+@pytest.mark.parametrize("backend", ["numpy", "torch"])
+@pytest.mark.parametrize("dtype", ["complex64", "complex128"])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("imaginary", [0, 0.5])
+def test_complex_tensor_inputs_are_rejected_without_device_transfer(
+    backend, dtype, device, imaginary, monkeypatch
+):
+    torch = pytest.importorskip("torch")
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA device is unavailable")
+    solver = KinematicsSolver(
+        RobotModel.from_urdf(URDF),
+        config=SolverConfig(
+            backend=backend,
+            device=device if backend == "torch" else "cpu",
+            dtype="float32" if dtype == "complex64" else "float64",
+        ),
+    )
+    configuration = torch.tensor(
+        [0.3 + imaginary * 1j, 0.7],
+        dtype=getattr(torch, dtype),
+        device=device,
+        requires_grad=True,
+    )
+    target = torch.eye(4, dtype=getattr(torch, dtype), device=device)
+    target[0, 3] = imaginary * 1j
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("complex rejection must only inspect dtype metadata")
+
+    monkeypatch.setattr(torch.Tensor, "cpu", unexpected)
+    monkeypatch.setattr(torch.Tensor, "numpy", unexpected)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        for operation in ("forward", "jacobian", "forward_with_jacobian", "dexterity"):
+            with pytest.raises(ValueError, match="real values"):
+                getattr(solver, operation)(configuration)
+        for arguments in (
+            {"target": target},
+            {"target": np.eye(4), "seed": configuration},
+            {
+                "target": np.eye(4),
+                "posture_reference": configuration,
+                "posture_gain": 0.1,
+            },
+        ):
+            with pytest.raises(ValueError, match="real values"):
+                solver.inverse(**arguments)
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_real_tensor_conversion_preserves_fk_gradient_and_device(dtype, device):
+    torch = pytest.importorskip("torch")
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA device is unavailable")
+    solver = KinematicsSolver(
+        RobotModel.from_urdf(URDF),
+        config=SolverConfig(backend="torch", device=device, dtype=dtype),
+    )
+    configuration = torch.tensor(
+        [0.3, 0.7], dtype=getattr(torch, dtype), device=device, requires_grad=True
+    )
+    pose, jacobian = solver.forward_with_jacobian(configuration)
+    pose[:3, 3].sum().backward()
+    torch.testing.assert_close(configuration.grad, jacobian[:3].sum(dim=0))
+    assert pose.dtype == configuration.dtype
+    assert pose.device == configuration.device
+    np.testing.assert_allclose(
+        _to_numpy(pose), _to_numpy(solver.forward([0.3, 0.7])), rtol=1e-6, atol=1e-7
+    )
 
 
 @pytest.mark.parametrize("backend", ["numpy", "torch"])
@@ -347,6 +457,41 @@ def test_ik_recognizes_convergence_on_final_step(backend):
 
 
 @pytest.mark.parametrize("backend", ["numpy", "torch"])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("position_only,damping", [(True, 1e-8), (False, 1e-6)])
+def test_small_damping_ik_handles_a_singular_seed_in_a_batch(
+    backend, dtype, position_only, damping
+):
+    if backend == "torch":
+        pytest.importorskip("torch")
+    solver = KinematicsSolver(
+        RobotModel.from_urdf(URDF),
+        config=SolverConfig(
+            backend=backend, device="cpu", dtype=dtype, damping=damping
+        ),
+    )
+    targets = solver.forward([[0.2, 0.4], [0.31, 0.51]])
+    result = solver.inverse(
+        targets, seed=[[0, 0], [0.3, 0.5]], position_only=position_only
+    )
+    assert bool(result.success.all())
+    assert str(result.positions.dtype).endswith(dtype)
+    achieved = _to_numpy(solver.forward(result.positions))
+    targets = _to_numpy(targets)
+    residual = np.linalg.norm(achieved[:, :3, 3] - targets[:, :3, 3], axis=1)
+    if not position_only:
+        rotation_chord = np.linalg.norm(
+            achieved[:, :3, :3] - targets[:, :3, :3], axis=(1, 2)
+        ) / np.sqrt(2)
+        residual = np.hypot(residual, rotation_chord)
+    np.testing.assert_allclose(
+        _to_numpy(result.residual),
+        residual,
+        atol=2e-7 if dtype == "float32" else 1e-12,
+    )
+
+
+@pytest.mark.parametrize("backend", ["numpy", "torch"])
 @pytest.mark.parametrize("count,batch", [(1, 4), (5, 2), (3, 1)])
 def test_cartesian_analysis_handles_singleton_batches(backend, count, batch):
     if backend == "torch":
@@ -461,6 +606,199 @@ def test_solver_rejects_noninteger_iteration_and_restart_counts(value):
 
 def _to_numpy(value):
     return value.detach().cpu().numpy() if hasattr(value, "detach") else value
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize(
+    "backend,device", [("numpy", "cpu"), ("torch", "cpu"), ("torch", "cuda")]
+)
+def test_mixed_axis_chain_matches_spatial_finite_differences(backend, device, dtype):
+    if backend == "torch":
+        torch = pytest.importorskip("torch")
+        if device == "cuda" and not torch.cuda.is_available():
+            pytest.skip("CUDA device is unavailable")
+    model = RobotModel.from_urdf(URDF.parent / "mixed_chain.urdf")
+    solver = KinematicsSolver(
+        model, config=SolverConfig(backend=backend, device=device, dtype=dtype)
+    )
+    reference = KinematicsSolver(model, config=SolverConfig(backend="numpy"))
+    configurations = np.array([[0.3, 0.2, -0.7], [-0.4, -0.1, 1.2]], dtype=dtype)
+    pose, jacobian = solver.forward_with_jacobian(configurations)
+    links = solver.forward(configurations, all_links=True)
+    tolerance = 2e-6 if dtype == "float32" else 1e-9
+    np.testing.assert_allclose(
+        _to_numpy(pose), reference.forward(configurations), atol=tolerance
+    )
+    np.testing.assert_allclose(_to_numpy(links[solver.tip_link]), _to_numpy(pose))
+    rotation = reference.forward(configurations)[:, :3, :3]
+    epsilon = 1e-6
+    for column in range(solver.dof):
+        plus, minus = configurations.astype(float), configurations.astype(float)
+        plus[:, column] += epsilon
+        minus[:, column] -= epsilon
+        derivative = (reference.forward(plus) - reference.forward(minus)) / (
+            2 * epsilon
+        )
+        skew = derivative[:, :3, :3] @ rotation.swapaxes(1, 2)
+        angular = np.stack((skew[:, 2, 1], skew[:, 0, 2], skew[:, 1, 0]), axis=1)
+        expected = np.concatenate((derivative[:, :3, 3], angular), axis=1)
+        np.testing.assert_allclose(
+            _to_numpy(jacobian)[:, :, column], expected, atol=tolerance
+        )
+    if backend == "torch":
+        configuration = torch.tensor(
+            configurations[0],
+            dtype=getattr(torch, dtype),
+            device=device,
+            requires_grad=True,
+        )
+        derivative = torch.autograd.functional.jacobian(solver.forward, configuration)
+        torch.testing.assert_close(
+            derivative[:3, 3],
+            solver.jacobian(configuration)[:3],
+            atol=tolerance,
+            rtol=tolerance,
+        )
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize(
+    "backend,device", [("numpy", "cpu"), ("torch", "cpu"), ("torch", "cuda")]
+)
+def test_solver_geometry_is_a_consistent_snapshot_of_mutable_model(
+    backend, device, dtype
+):
+    if backend == "torch":
+        torch = pytest.importorskip("torch")
+        if device == "cuda" and not torch.cuda.is_available():
+            pytest.skip("CUDA device is unavailable")
+    model = RobotModel.from_urdf(URDF)
+    solver = KinematicsSolver(
+        model, config=SolverConfig(backend=backend, device=device, dtype=dtype)
+    )
+    configuration = np.array([0.4, 0.7])
+    original_pose, original_jacobian = solver.forward_with_jacobian(configuration)
+    model.joints[0].axis[:] = [1, 0, 0]
+    model.joints[0].origin[:3, 3] = [0.4, -0.3, 0.2]
+    pose, jacobian = solver.forward_with_jacobian(configuration)
+    np.testing.assert_array_equal(_to_numpy(pose), _to_numpy(original_pose))
+    np.testing.assert_array_equal(_to_numpy(jacobian), _to_numpy(original_jacobian))
+
+    epsilon = 1e-3 if dtype == "float32" else 1e-6
+    tolerance = 2e-4 if dtype == "float32" else 1e-9
+    for column in range(solver.dof):
+        plus, minus = configuration.copy(), configuration.copy()
+        plus[column] += epsilon
+        minus[column] -= epsilon
+        derivative = (
+            _to_numpy(solver.forward(plus)) - _to_numpy(solver.forward(minus))
+        ) / (2 * epsilon)
+        skew = derivative[:3, :3] @ _to_numpy(pose)[:3, :3].T
+        expected = np.r_[derivative[:3, 3], skew[2, 1], skew[0, 2], skew[1, 0]]
+        np.testing.assert_allclose(
+            _to_numpy(jacobian)[:, column], expected, atol=tolerance
+        )
+
+
+def _precision_stage(tmp_path, lower, upper, *, origin=0, axis="1 0 0"):
+    source = tmp_path / "precision.urdf"
+    source.write_text(
+        '<robot name="precision"><link name="base"/><link name="tcp"/>'
+        '<joint name="slide" type="prismatic"><parent link="base"/>'
+        f'<child link="tcp"/><origin xyz="{origin} 0 0"/>'
+        f'<axis xyz="{axis}"/><limit lower="{lower}" upper="{upper}"/>'
+        "</joint></robot>"
+    )
+    return RobotModel.from_urdf(source)
+
+
+@pytest.mark.parametrize(
+    "lower,upper",
+    [
+        (1, 1.00000001),
+        (0, 1e-50),
+        (0, 1.401298464324817e-45),
+        (1e39, 2e39),
+        (-3e38, 3e38),
+        (2e38, 3e38),
+    ],
+)
+@pytest.mark.parametrize(
+    "backend,device", [("numpy", "cpu"), ("torch", "cpu"), ("torch", "cuda")]
+)
+def test_precision_degenerate_limits_fail_before_solver_computation(
+    tmp_path, lower, upper, backend, device
+):
+    if backend == "torch":
+        torch = pytest.importorskip("torch")
+        if device == "cuda" and not torch.cuda.is_available():
+            pytest.skip("CUDA device is unavailable")
+    model = _precision_stage(tmp_path, lower, upper)
+    with np.errstate(over="raise", invalid="raise", divide="raise", under="raise"):
+        with pytest.raises(ValueError, match="slide.*float32"):
+            KinematicsSolver(
+                model,
+                config=SolverConfig(backend=backend, device=device, dtype="float32"),
+            )
+    solver = KinematicsSolver(
+        model,
+        config=SolverConfig(
+            backend=backend,
+            device=device,
+            dtype="float64",
+            max_iterations=1,
+            joint_centering_gain=0.01,
+        ),
+    )
+    seed = solver.joint_limits.mean(axis=1)
+    assert np.isfinite(_to_numpy(solver.dexterity(seed).joint_limit_margin)).all()
+    result = solver.inverse(np.eye(4), seed=seed, position_only=True)
+    assert np.isfinite(_to_numpy(result.positions)).all()
+    assert np.isfinite(_to_numpy(result.residual)).all()
+
+
+@pytest.mark.parametrize(
+    "backend,device", [("numpy", "cpu"), ("torch", "cpu"), ("torch", "cuda")]
+)
+def test_precision_overflowed_geometry_fails_at_construction(tmp_path, backend, device):
+    if backend == "torch":
+        torch = pytest.importorskip("torch")
+        if device == "cuda" and not torch.cuda.is_available():
+            pytest.skip("CUDA device is unavailable")
+    model = _precision_stage(tmp_path, -1, 1, origin=1e39)
+    with np.errstate(over="raise", invalid="raise"):
+        with pytest.raises(ValueError, match="slide.*float32"):
+            KinematicsSolver(
+                model,
+                config=SolverConfig(backend=backend, device=device, dtype="float32"),
+            )
+    solver = KinematicsSolver(
+        model, config=SolverConfig(backend=backend, device=device, dtype="float64")
+    )
+    assert np.isfinite(_to_numpy(solver.forward([0]))).all()
+
+
+@pytest.mark.parametrize(
+    "backend,device", [("numpy", "cpu"), ("torch", "cpu"), ("torch", "cuda")]
+)
+def test_normal_float32_limit_rounding_and_normalized_axes_remain_supported(
+    tmp_path, backend, device
+):
+    if backend == "torch":
+        torch = pytest.importorskip("torch")
+        if device == "cuda" and not torch.cuda.is_available():
+            pytest.skip("CUDA device is unavailable")
+    model = _precision_stage(tmp_path, 0, 1.1, axis="1e300 0 0")
+    solver = KinematicsSolver(
+        model,
+        config=SolverConfig(backend=backend, device=device, dtype="float32"),
+    )
+    target = np.eye(4)
+    target[0, 3] = 1.1
+    result = solver.inverse(target, seed=[2], position_only=True)
+    assert bool(result.success)
+    assert float(result.positions[0]) == float(np.float32(1.1))
+    assert float(result.residual) == 0
 
 
 @pytest.mark.parametrize("backend", ["numpy", "torch"])

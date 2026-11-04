@@ -140,6 +140,25 @@ def test_initial_bracket_within_tolerance_needs_only_endpoint_checks():
     assert result.to_dict()["summary"]["target_evaluations"] == 3
 
 
+@pytest.mark.parametrize("scale", [1e-200, 1e200])
+def test_boundary_distances_preserve_finite_extreme_scales(scale):
+    from workspace_analyzer.boundary import _distance
+
+    with np.errstate(over="raise", under="raise"):
+        distance = _distance([[3 * scale, 4 * scale, 0]], [[0, 0, 0]])
+    np.testing.assert_allclose(distance, [5 * scale], rtol=1e-15, atol=0)
+
+
+def test_nonzero_segment_survives_squared_length_underflow():
+    result = refine_translation_boundary(
+        _solver(), np.eye(4), [1e-200, 0, 0], reachability=_settings()
+    )
+    assert result.statuses.tolist() == ["end_succeeded"]
+    np.testing.assert_allclose(
+        result.to_dict()["segments"][0]["width_m"], 1e-200, rtol=1e-15, atol=0
+    )
+
+
 def test_float32_precision_limit_terminates_without_repeating_same_target():
     result = refine_translation_boundary(
         _solver(dtype="float32"),

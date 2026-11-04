@@ -190,15 +190,7 @@ def analyze_targets(
     joints = np.empty((count, solver.dof), dtype=solver.config.dtype)
     reachable = np.empty(count, dtype=bool)
     residual = np.empty(count, dtype=solver.config.dtype)
-    metric_names = (
-        "manipulability",
-        "minimum_singular_value",
-        "isotropy",
-        "condition_number",
-        "joint_limit_margin",
-        "position_error",
-        "rotation_error",
-    )
+    metric_names = (*_QUALITY_METRICS, "position_error", "rotation_error")
     metrics = {
         name: np.full(count, np.nan, dtype=solver.config.dtype) for name in metric_names
     }
@@ -233,31 +225,43 @@ def analyze_targets(
         joints[selection] = _numpy(ik.positions)
         reachable[selection] = _numpy(ik.success)
         residual[selection] = _numpy(ik.residual)
-        good = np.flatnonzero(reachable[selection])
+        reached_indices = np.flatnonzero(reachable[selection])
         achieved = np.empty((stop - start, 4, 4), dtype=solver.config.dtype)
-        if len(good):
-            q = solver._configuration_array(joints[start + good])
-            fk, jacobian = solver.forward_with_jacobian(q)
+        if len(reached_indices):
+            # Keep IK configurations on their backend for the follow-up kernels.
+            configurations = ik.positions[reached_indices]
+            poses_achieved, jacobian = solver.forward_with_jacobian(configurations)
             quality = _dexterity_from_jacobian(
                 solver,
-                q,
+                configurations,
                 jacobian,
                 task=config.dexterity_task,
                 weights=config.dexterity_weights,
             )
-            achieved[good] = _numpy(fk)
-            for name in metric_names[:5]:
-                metrics[name][start + good] = _numpy(getattr(quality, name))
+            achieved[reached_indices] = _numpy(poses_achieved)
+            quality_values = tuple(getattr(quality, name) for name in _QUALITY_METRICS)
+            if solver.backend == "torch":
+                import torch
+
+                # Transfer all scalar metrics together instead of synchronizing
+                # the device separately for each measurement.
+                quality_values = _numpy(torch.stack(quality_values))
+            for name, values in zip(_QUALITY_METRICS, quality_values):
+                metrics[name][start + reached_indices] = values
             singular = _numpy(quality.singular_values)
             tolerance = (
                 np.finfo(singular.dtype).eps
                 * max(task_dimension, solver.dof)
                 * singular[:, :1]
             )
-            rank[start + good] = np.count_nonzero(singular > tolerance, axis=1)
-        bad = np.flatnonzero(~reachable[selection])
-        if len(bad):
-            achieved[bad] = _numpy(solver.forward(joints[start + bad]))
+            rank[start + reached_indices] = np.count_nonzero(
+                singular > tolerance, axis=1
+            )
+        failed_indices = np.flatnonzero(~reachable[selection])
+        if len(failed_indices):
+            achieved[failed_indices] = _numpy(
+                solver.forward(ik.positions[failed_indices])
+            )
         metrics["position_error"][selection] = np.linalg.norm(
             achieved[:, :3, 3] - points[selection], axis=1
         )
@@ -523,6 +527,7 @@ def _digest(array):
 
 
 def _rotation_error(target, achieved):
+    """Return principal angle errors in radians for batched rotation matrices."""
     rotation = target @ achieved.swapaxes(1, 2)
     skew = np.stack(
         (

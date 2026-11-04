@@ -13,6 +13,7 @@ import numpy as np
 from ._arrays import as_numpy as _numpy
 from ._output_paths import validate_output_paths
 from ._progress import CLIProgress
+from ._validation import require_port
 from .acceptance import AcceptanceConfig, add_acceptance_arguments, apply_acceptance
 from .analyzer import CartesianConfig, WorkspaceAnalyzer, WorkspaceConfig
 from .cache import ResultCache
@@ -281,6 +282,8 @@ def run_arguments(parser, args):
     ):
         parser.error("quality gates require --mode targets or --mode plane")
     try:
+        if args.viser:
+            require_port(args.port)
         acceptance = AcceptanceConfig(args.min_success_rate, args.min_quality_pass_rate)
         if acceptance.enabled and (args.mode == "joint" or args.viser):
             parser.error("acceptance requires a headless reachability mode")

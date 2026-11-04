@@ -92,8 +92,6 @@ def main(argv=None):
         # Quality reassessment already refreshes saved acceptance requirements.
         if acceptance.enabled or not (overrides or args.reset_quality_gates):
             result = reassess_acceptance(result, acceptance)
-        summary = result_summary(result)
-        text = json.dumps(summary, indent=2, allow_nan=False) + "\n"
         paths = {
             kind: path
             for kind, path in (
@@ -103,11 +101,17 @@ def main(argv=None):
             )
             if path is not None
         }
+        # File diagnostics do not depend on encoding the terminal summary.
         saved, errors = save_result_artifacts(result, paths)
-        print(text, end="")
+        try:
+            text = json.dumps(result_summary(result), indent=2, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            errors["summary"] = str(exc)
+        else:
+            print(text)
         if errors:
             details = "; ".join(
-                f"{paths[kind]}: {error}" for kind, error in errors.items()
+                f"{paths.get(kind, kind)}: {error}" for kind, error in errors.items()
             )
             raise ValueError(
                 "export failed: "

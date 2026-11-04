@@ -37,6 +37,26 @@ def _args(output, backend="numpy"):
     ]
 
 
+def test_workflow_interrupted_target_write_preserves_previous_artifact(
+    tmp_path, monkeypatch
+):
+    target_path = tmp_path / "targets.npz"
+    target_path.write_bytes(b"previous target archive")
+
+    def interrupted(destination, **kwargs):
+        if hasattr(destination, "write"):
+            destination.write(b"partial archive")
+        else:
+            Path(destination).write_bytes(b"partial archive")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(MODULE.np, "savez_compressed", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        MODULE.main(_args(tmp_path))
+    assert target_path.read_bytes() == b"previous target archive"
+    assert list(tmp_path.iterdir()) == [target_path]
+
+
 @pytest.mark.parametrize("backend", ["numpy", "torch"])
 @pytest.mark.parametrize("robustness", [False, True])
 @pytest.mark.parametrize("boundary", [False, True])

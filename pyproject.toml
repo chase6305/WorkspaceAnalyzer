@@ -25,10 +25,10 @@ dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]
 torch = ["torch>=2.1"]
-viser = ["viser>=0.2", "trimesh>=4.0"]
+viser = ["viser>=1.1", "trimesh>=4.0"]
 sampling = ["scipy>=1.10"]
 dev = ["build>=1.2", "pytest>=8", "pytest-cov>=7", "ruff>=0.6"]
-all = ["torch>=2.1", "viser>=0.2", "trimesh>=4.0", "scipy>=1.10"]
+all = ["torch>=2.1", "viser>=1.1", "trimesh>=4.0", "scipy>=1.10"]
 
 [project.scripts]
 workspace-analyzer = "workspace_analyzer.cli:entrypoint"

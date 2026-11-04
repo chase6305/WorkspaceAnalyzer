@@ -1,6 +1,8 @@
+import gc
 import socket
 import threading
 import time
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +14,7 @@ pytest.importorskip("trimesh")
 from workspace_analyzer import (  # noqa: E402
     CartesianConfig,
     KinematicsSolver,
+    PlaneConfig,
     ReachabilityConfig,
     RobotModel,
     SamplingConfig,
@@ -73,6 +76,19 @@ def _free_port():
             return sock.getsockname()[1]
     except PermissionError:
         pytest.skip("the test environment does not allow local sockets")
+
+
+def _viewer_control(viewer, label):
+    for control in viewer.server.gui._gui_input_handle_from_uuid.values():
+        if getattr(control, "label", None) != label:
+            continue
+        for callback in control._impl.update_cb:
+            if any(
+                cell.cell_contents is viewer
+                for cell in getattr(callback, "__closure__", None) or ()
+            ):
+                return control
+    raise AssertionError(f"missing viewer control: {label}")
 
 
 def test_viser_cartesian_controls_and_recompute():
@@ -233,6 +249,338 @@ def test_viewer_close_stops_playback_and_prevents_restart():
         assert viewer._playback_thread is worker
     finally:
         viewer.close()
+
+
+@pytest.mark.parametrize(
+    "backend,device", [("numpy", "cpu"), ("torch", "cpu"), ("torch", "cuda")]
+)
+@pytest.mark.parametrize("angle", [0, 1e-3])
+def test_float32_trajectory_orientation_display_preserves_small_angles(
+    backend, device, angle
+):
+    if backend == "torch":
+        torch = pytest.importorskip("torch")
+        if device == "cuda" and not torch.cuda.is_available():
+            pytest.skip("CUDA device is unavailable")
+    solver = KinematicsSolver(
+        RobotModel.from_urdf(URDF),
+        config=SolverConfig(backend=backend, device=device, dtype="float32"),
+    )
+    configuration = [-0.3246581216898804, 0.38049788130940476]
+    target = solver.forward(configuration)
+    if hasattr(target, "detach"):
+        target = target.detach().cpu().numpy()
+    trajectory = solver.solve_trajectory(target[None], seed=configuration)
+    rotation_offset = np.array(
+        [
+            [np.cos(angle), -np.sin(angle), 0],
+            [np.sin(angle), np.cos(angle), 0],
+            [0, 0, 1],
+        ]
+    )
+    trajectory.target_poses[0, :3, :3] = rotation_offset @ target[:3, :3]
+    with ViserWorkspace(
+        solver, port=_free_port(), initial_q=configuration, load_robot_visuals=False
+    ) as viewer:
+        viewer.add_trajectory(trajectory)
+        # A float32 rotation is only approximately orthogonal. Trace-only acos
+        # can report hundredths of a degree even for an identical target.
+        expected = f"orientation error: **{np.degrees(angle):.4f} deg**"
+        assert expected in viewer._trajectory_frame_info.content
+
+
+def test_playback_thread_start_failure_restores_controls_and_allows_retry(monkeypatch):
+    solver = KinematicsSolver(
+        RobotModel.from_urdf(URDF), config=SolverConfig(backend="numpy")
+    )
+    joints = np.array([[0.2, 0.7], [0.21, 0.69], [0.22, 0.68]])
+    trajectory = solver.solve_trajectory(solver.forward(joints), seed=joints[0])
+    with ViserWorkspace(solver, port=_free_port(), load_robot_visuals=False) as viewer:
+        viewer.add_trajectory(trajectory)
+        original_start = threading.Thread.start
+
+        def fail_playback_start(thread, *args, **kwargs):
+            target = getattr(thread, "_target", None)
+            if target and target.__qualname__.endswith(
+                ".play_trajectory.<locals>.work"
+            ):
+                raise RuntimeError("playback thread unavailable")
+            return original_start(thread, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(threading.Thread, "start", fail_playback_start)
+            viewer.play_trajectory()
+        assert viewer._playback_thread is None
+        assert not viewer._play_button.disabled
+        assert "playback thread unavailable" in viewer._trajectory_frame_info.content
+        viewer.play_trajectory()
+        assert viewer._playback_thread.ident is not None
+
+
+def test_callbacks_after_close_do_not_change_display():
+    from workspace_analyzer import PlaneConfig
+
+    solver = KinematicsSolver(
+        RobotModel.from_urdf(URDF), config=SolverConfig(backend="numpy")
+    )
+    joints = np.array([[0.2, 0.7], [0.3, 0.6], [0.4, 0.5]])
+    trajectory = solver.solve_trajectory(solver.forward(joints), seed=joints[0])
+    viewer = ViserWorkspace(solver, port=_free_port(), load_robot_visuals=False)
+    try:
+        viewer.add_trajectory(trajectory)
+        previous_joints = viewer._q.copy()
+        target_handle = viewer._handles["current_target"]
+        previous_target = target_handle.position.copy()
+        previous_info = viewer._trajectory_frame_info.content
+        viewer.close()
+        viewer.show_trajectory_frame(2)
+        np.testing.assert_array_equal(viewer._q, previous_joints)
+        np.testing.assert_array_equal(
+            viewer._handles["current_target"].position, previous_target
+        )
+        assert viewer._trajectory_frame_info.content == previous_info
+        viewer.add_trajectory(trajectory)
+        assert viewer._handles["current_target"] is target_handle
+        viewer.configure_plane_recompute(PlaneConfig(plane="yz"))
+        assert viewer.plane_panel.plane.value == "xy"
+    finally:
+        viewer.close()
+
+
+@pytest.mark.parametrize(
+    "label,value",
+    [
+        ("shoulder", 1.1),
+        ("Capture current FK pose", True),
+        ("Reset to initial pose", True),
+        ("Frame robot and workspace", True),
+        ("Workspace point size", 0.025),
+        ("Trajectory target size", 0.025),
+        ("Trajectory line width", 7.0),
+        ("Workspace color metric", "joint_limit_margin"),
+        ("Robot visuals", False),
+        ("Workspace", False),
+    ],
+)
+def test_shared_viewer_close_ignores_callbacks_waiting_for_lock(
+    label, value, monkeypatch
+):
+    solver = KinematicsSolver(
+        RobotModel.from_urdf(URDF), config=SolverConfig(backend="numpy")
+    )
+    with ViserWorkspace(solver, port=_free_port(), load_robot_visuals=False) as peer:
+        viewer = ViserWorkspace(
+            solver,
+            server=peer.server,
+            label="closing",
+            gui_label="Closing",
+            workspace_root="/closing_workspace",
+            initial_q=[0.2, 0.7],
+            load_robot_visuals=False,
+        )
+        try:
+            joints = np.array([[0.8, 0.4], [0.85, 0.35], [0.9, 0.3]])
+            trajectory = solver.solve_trajectory(solver.forward(joints), seed=joints[0])
+            viewer.add_trajectory(trajectory)
+            workspace = WorkspaceAnalyzer(
+                solver, WorkspaceConfig(SamplingConfig(num_samples=16))
+            ).analyze()
+            viewer.add_workspace(workspace)
+            camera = peer.server.initial_camera
+            camera.position = (0, 0, 3)
+            control = _viewer_control(viewer, label)
+            display_lock = viewer._lock
+            waiting = threading.Event()
+            errors = []
+
+            class ObservedLock:
+                def __enter__(self):
+                    if threading.current_thread() is worker:
+                        waiting.set()
+                    display_lock.acquire()
+
+                def __exit__(self, *args):
+                    display_lock.release()
+
+            def deliver_update():
+                try:
+                    control.value = value
+                except Exception as exc:
+                    errors.append(exc)
+
+            def state():
+                return {
+                    "joints": viewer._q.copy(),
+                    "reference_joints": viewer.reference_joints.copy(),
+                    "reference_pose": viewer.reference_pose.copy(),
+                    "tool": viewer._handles["tool"].position.copy(),
+                    "reference_info": viewer._reference_info.content,
+                    "camera": np.array(camera.position),
+                    "cloud_colors": viewer._handles["workspace_cloud"].colors.copy(),
+                    "workspace_size": viewer._workspace_point_size,
+                    "trajectory_size": viewer._handles["trajectory_targets"].point_size,
+                    "trajectory_width": viewer._handles["trajectory_path"].thickness,
+                    "robot_visible": viewer._robot_root.visible,
+                    "workspace_visible": viewer._workspace_root.visible,
+                }
+
+            worker = threading.Thread(target=deliver_update)
+            monkeypatch.setattr(viewer, "_lock", ObservedLock())
+            with viewer._lock:
+                worker.start()
+                assert waiting.wait(3)
+                viewer.close()
+                frozen = state()
+            worker.join(timeout=3)
+            assert not worker.is_alive()
+            assert not errors
+            observed = state()
+            for name, expected in frozen.items():
+                np.testing.assert_array_equal(observed[name], expected, err_msg=name)
+            captured = viewer.capture_reference_pose()
+            np.testing.assert_array_equal(captured, frozen["reference_pose"])
+            captured[:] = 0
+            np.testing.assert_array_equal(
+                viewer.reference_pose, frozen["reference_pose"]
+            )
+            assert not peer._closed
+            peer._sliders[0].value = 0.95
+            assert peer._q[0] == 0.95
+            peer.frame_view()
+            assert not np.array_equal(camera.position, frozen["camera"])
+        finally:
+            viewer.close()
+
+
+def test_replacing_trajectory_stops_old_playback(monkeypatch):
+    solver = KinematicsSolver(
+        RobotModel.from_urdf(URDF), config=SolverConfig(backend="numpy")
+    )
+    joints = np.array([[0.2, 0.7], [0.3, 0.6], [0.4, 0.5]])
+    original = solver.solve_trajectory(solver.forward(joints), seed=joints[0])
+    replacement = solver.solve_trajectory(solver.forward(joints[::-1]), seed=joints[-1])
+    with ViserWorkspace(solver, port=_free_port(), load_robot_visuals=False) as viewer:
+        viewer.add_trajectory(original)
+        viewer._fps_slider.value = 1
+        first_frame = threading.Event()
+        show_frame = viewer.show_trajectory_frame
+
+        def show(index, **kwargs):
+            show_frame(index, **kwargs)
+            if threading.current_thread() is viewer._playback_thread:
+                first_frame.set()
+
+        monkeypatch.setattr(viewer, "show_trajectory_frame", show)
+        viewer.play_trajectory()
+        worker = viewer._playback_thread
+        assert first_frame.wait(5)
+        viewer.add_trajectory(replacement)
+        worker.join(timeout=1)
+        assert not worker.is_alive()
+        assert viewer._trajectory is replacement
+        np.testing.assert_allclose(viewer._q, replacement.positions[0])
+        assert not viewer._play_button.disabled
+
+
+def test_replacing_trajectory_cancels_playback_waiting_for_display_lock(monkeypatch):
+    solver = KinematicsSolver(
+        RobotModel.from_urdf(URDF), config=SolverConfig(backend="numpy")
+    )
+    joints = np.array([[0.2, 0.7], [0.3, 0.6], [0.4, 0.5]])
+    original = solver.solve_trajectory(solver.forward(joints), seed=joints[0])
+    replacement = solver.solve_trajectory(solver.forward(joints[::-1]), seed=joints[-1])
+    with ViserWorkspace(solver, port=_free_port(), load_robot_visuals=False) as viewer:
+        viewer.add_trajectory(original)
+        viewer.show_trajectory_frame(2)
+        viewer._frame_slider.value = 2
+        display_lock = viewer._lock
+        waiting = threading.Event()
+
+        class ObservedLock:
+            def __enter__(self):
+                if threading.current_thread() is viewer._playback_thread:
+                    waiting.set()
+                display_lock.acquire()
+
+            def __exit__(self, *args):
+                display_lock.release()
+
+        monkeypatch.setattr(viewer, "_lock", ObservedLock())
+        # Hold the display lock until the old worker has passed its outer stop
+        # check. Replacing the trajectory must invalidate that pending frame.
+        with viewer._lock:
+            viewer.play_trajectory()
+            worker = viewer._playback_thread
+            assert waiting.wait(3)
+            viewer.add_trajectory(replacement)
+        worker.join(timeout=3)
+        assert not worker.is_alive()
+        assert viewer._frame_slider.value == 0
+        np.testing.assert_allclose(viewer._q, replacement.positions[0])
+        assert not viewer._play_button.disabled
+
+
+@pytest.mark.parametrize(
+    "backend,device", [("numpy", "cpu"), ("torch", "cpu"), ("torch", "cuda")]
+)
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_robot_geometry_shares_the_same_display_transform(backend, device, dtype):
+    from trimesh.transformations import quaternion_matrix
+
+    from workspace_analyzer.model import _rpy_matrix
+
+    if backend == "torch":
+        torch = pytest.importorskip("torch")
+        if device == "cuda" and not torch.cuda.is_available():
+            pytest.skip("CUDA is unavailable")
+    solver = KinematicsSolver(
+        RobotModel.from_urdf(URDF.parent / "mixed_chain.urdf"),
+        config=SolverConfig(backend=backend, device=device, dtype=dtype),
+    )
+    configuration = np.array([0.4, 0.2, -0.3])
+    with ViserWorkspace(solver, port=_free_port(), load_robot_visuals=False) as viewer:
+        display_from_base = _rpy_matrix([0.3, -0.2, 0.1]).astype(dtype)
+        display_from_base[:3, 3] = [0.4, -0.3, 0.8]
+        viewer._display_base_transform = display_from_base
+        viewer.update_robot(configuration)
+        expected_poses = solver.forward(configuration, all_links=True)
+        viewer._update_robot_transforms(dict(reversed(tuple(expected_poses.items()))))
+        tolerance = 2e-7 if dtype == "float32" else 1e-12
+        expected_points = []
+        for name, pose in expected_poses.items():
+            if hasattr(pose, "detach"):
+                pose = pose.detach().cpu().numpy()
+            expected = display_from_base @ pose
+            expected_points.append(expected[:3, 3])
+            np.testing.assert_allclose(
+                viewer._link_frames[name].position, expected[:3, 3], atol=1e-7
+            )
+            quaternion = viewer._link_frames[name].wxyz
+            np.testing.assert_allclose(
+                np.linalg.norm(quaternion), 1.0, atol=tolerance, rtol=0
+            )
+            np.testing.assert_allclose(
+                quaternion_matrix(quaternion)[:3, :3],
+                expected[:3, :3],
+                atol=tolerance,
+                rtol=0,
+            )
+        expected_points = np.asarray(expected_points)
+        np.testing.assert_allclose(
+            viewer._handles["joints"].points, expected_points, atol=1e-7
+        )
+        np.testing.assert_allclose(
+            viewer._handles["skeleton"].points,
+            np.stack((expected_points[:-1], expected_points[1:]), axis=1),
+            atol=1e-7,
+        )
+        np.testing.assert_allclose(
+            viewer._handles["tool"].position, expected_points[-1], atol=1e-7
+        )
+        np.testing.assert_array_equal(
+            viewer._handles["tool"].wxyz,
+            viewer._link_frames[solver.tip_link].wxyz,
+        )
 
 
 @pytest.mark.parametrize(
@@ -910,6 +1258,11 @@ def test_invalid_captured_reference_does_not_lock_recompute():
 @pytest.mark.parametrize(
     "options",
     [
+        {"port": -1},
+        {"port": 65536},
+        {"port": True},
+        {"port": 8080.5},
+        {"port": "8080"},
         {"workspace_root": "relative/path"},
         {"scene_offset": [0, np.nan, 0]},
         {"initial_q": [0]},
@@ -981,19 +1334,17 @@ def test_failed_viewer_start_stops_only_its_owned_server(shared, stage, monkeypa
     )
     server_class = viser.ViserServer
     original_stop = server_class.stop
-    created, stopped = [], []
+    created, stopped, baseline_resources = [], [], []
 
     def create_server(*args, **kwargs):
         server = server_class(*args, **kwargs)
         created.append(server)
+        baseline_resources.append(_server_resource_ids(server))
         return server
 
     def stop(server):
         stopped.append(server)
         original_stop(server)
-
-    def interrupted(*args, **kwargs):
-        raise RuntimeError("GUI initialization failed")
 
     monkeypatch.setattr(server_class, "stop", stop)
     monkeypatch.setattr(viser, "ViserServer", create_server)
@@ -1002,6 +1353,12 @@ def test_failed_viewer_start_stops_only_its_owned_server(shared, stage, monkeypa
         "visuals": (ViserWorkspace, "load_urdf_visuals"),
         "plane": (PlaneReachabilityPanel, "__init__"),
     }[stage]
+    initialize = getattr(owner, method)
+
+    def interrupted(*args, **kwargs):
+        initialize(*args, **kwargs)
+        raise RuntimeError("GUI initialization failed")
+
     monkeypatch.setattr(owner, method, interrupted)
     server = create_server(port=_free_port()) if shared else None
     try:
@@ -1014,6 +1371,7 @@ def test_failed_viewer_start_stops_only_its_owned_server(shared, stage, monkeypa
             )
         assert len(created) == 1
         assert stopped == ([] if shared else created)
+        assert _server_resource_ids(created[0]) == baseline_resources[0]
         if shared:
             with socket.create_connection(("127.0.0.1", server.get_port()), timeout=2):
                 pass
@@ -1021,3 +1379,174 @@ def test_failed_viewer_start_stops_only_its_owned_server(shared, stage, monkeypa
         for server in created:
             if server not in stopped:
                 original_stop(server)
+
+
+def _server_resource_ids(server):
+    gui = server.gui
+    return (
+        frozenset(gui._gui_input_handle_from_uuid),
+        frozenset(gui._container_handle_from_uuid),
+        frozenset(
+            (parent, child)
+            for parent, container in gui._container_handle_from_uuid.items()
+            for child in container._children
+        ),
+        frozenset(server.scene._handle_from_node_name),
+    )
+
+
+@pytest.mark.parametrize("reuse_paths", [False, True])
+def test_shared_viewer_close_releases_resources_and_callback_references(reuse_paths):
+    solver = KinematicsSolver(
+        RobotModel.from_urdf(URDF), config=SolverConfig(backend="numpy")
+    )
+    result = WorkspaceAnalyzer(solver).analyze_targets(
+        [[2, 0, 0]], ReachabilityConfig(restarts=1, rescue_restarts=0)
+    )
+    with ViserWorkspace(
+        solver,
+        port=_free_port(),
+        label="peer",
+        workspace_root="/peer_workspace",
+        load_robot_visuals=False,
+    ) as peer:
+        baseline = _server_resource_ids(peer.server)
+        references = []
+        for index in range(3):
+            label = "repeat" if reuse_paths else f"robot_{index}"
+            viewer = ViserWorkspace(
+                solver,
+                server=peer.server,
+                label=label,
+                workspace_root=f"/{label}_workspace",
+                load_robot_visuals=False,
+            )
+            viewer.add_workspace(result)
+            viewer.add_dashboard("Analysis summary")
+            references.append(weakref.ref(viewer))
+            if index == 1:
+                viewer._gui_folders[0].remove()
+            viewer.close()
+            viewer.close()
+            assert _server_resource_ids(peer.server) == baseline
+            del viewer
+            gc.collect()
+            assert all(reference() is None for reference in references)
+        peer._sliders[0].value = 0.35
+        assert peer._q[0] == 0.35
+        assert not peer._scene_root._impl.removed
+
+
+def test_closing_superseded_viewer_preserves_replacement_scene():
+    import viser
+
+    solver = KinematicsSolver(
+        RobotModel.from_urdf(URDF), config=SolverConfig(backend="numpy")
+    )
+    server = viser.ViserServer(port=_free_port())
+    baseline = _server_resource_ids(server)
+    old = replacement = None
+    try:
+        old = ViserWorkspace(solver, server=server, load_robot_visuals=False)
+        replacement = ViserWorkspace(solver, server=server, load_robot_visuals=False)
+        assert old._scene_root._impl.removed
+        assert old._workspace_root._impl.removed
+        old.close()
+        assert not replacement._scene_root._impl.removed
+        assert not replacement._workspace_root._impl.removed
+        assert not replacement._frame_slider._impl.removed
+        assert server.scene._handle_from_node_name[replacement.root] is (
+            replacement._scene_root
+        )
+        replacement._sliders[0].value = 0.35
+        assert replacement._q[0] == 0.35
+        replacement.update_robot(replacement._q)
+        replacement.close()
+        assert _server_resource_ids(server) == baseline
+    finally:
+        if old is not None:
+            old.close()
+        if replacement is not None:
+            replacement.close()
+        server.stop()
+
+
+@pytest.mark.parametrize("stage", ["controls", "plane"])
+def test_partial_folder_failure_preserves_shared_peer(stage, monkeypatch):
+    solver = KinematicsSolver(
+        RobotModel.from_urdf(URDF), config=SolverConfig(backend="numpy")
+    )
+    with ViserWorkspace(
+        solver,
+        port=_free_port(),
+        label="peer",
+        workspace_root="/peer_workspace",
+        load_robot_visuals=False,
+    ) as peer:
+        baseline = _server_resource_ids(peer.server)
+
+        def fail(*args, **kwargs):
+            raise RuntimeError("GUI element creation failed")
+
+        method = "add_slider" if stage == "controls" else "add_number"
+        monkeypatch.setattr(peer.server.gui, method, fail)
+        with pytest.raises(RuntimeError, match="GUI element creation failed"):
+            ViserWorkspace(solver, server=peer.server, load_robot_visuals=False)
+        assert _server_resource_ids(peer.server) == baseline
+        peer._sliders[0].value = 0.35
+        assert peer._q[0] == 0.35
+
+
+def test_slow_shared_plane_export_does_not_restore_closed_viewer_resources(
+    tmp_path, monkeypatch
+):
+    import workspace_analyzer.plane_visualization as plane_view
+
+    solver = KinematicsSolver(
+        RobotModel.from_urdf(URDF), config=SolverConfig(backend="numpy")
+    )
+    with ViserWorkspace(
+        solver,
+        port=0,
+        label="peer",
+        workspace_root="/peer_workspace",
+        load_robot_visuals=False,
+    ) as peer:
+        baseline = _server_resource_ids(peer.server)
+        with ViserWorkspace(
+            solver, server=peer.server, port=-1, load_robot_visuals=False
+        ) as viewer:
+            panel = viewer.plane_panel
+            report = tmp_path / "plane.json"
+            panel.configure(
+                PlaneConfig(resolution=3),
+                ReachabilityConfig(restarts=1, rescue_restarts=0),
+                report=report,
+            )
+            entered, release = threading.Event(), threading.Event()
+            real_writer = plane_view.save_result_artifacts
+
+            def write(*args, **kwargs):
+                entered.set()
+                assert release.wait(5)
+                return real_writer(*args, **kwargs)
+
+            monkeypatch.setattr(plane_view, "save_result_artifacts", write)
+            panel.compute()
+            try:
+                assert entered.wait(3)
+                viewer.close()
+                assert viewer._analysis_thread.is_alive()
+                assert _server_resource_ids(peer.server) == baseline
+                assert panel.info._impl.removed
+                frozen_info = panel.info.content, panel.export_info.content
+                peer._sliders[0].value = 0.35
+                assert peer._q[0] == 0.35
+            finally:
+                release.set()
+                viewer._analysis_thread.join(timeout=5)
+            assert not viewer._analysis_thread.is_alive()
+            assert report.is_file()
+            assert not panel._export_running
+            assert (panel.info.content, panel.export_info.content) == frozen_info
+            assert _server_resource_ids(peer.server) == baseline

@@ -57,6 +57,72 @@ def test_invalid_urdf_is_rejected(tmp_path, body, message):
         RobotModel.from_urdf(_write_urdf(tmp_path, body))
 
 
+def test_malformed_urdf_xml_reports_the_input_path(tmp_path):
+    source = _write_urdf(tmp_path, '<link name="base">')
+    with pytest.raises(ValueError, match="invalid URDF XML") as error:
+        RobotModel.from_urdf(source)
+    assert str(source) in str(error.value)
+
+
+@pytest.mark.parametrize("reverse_joints", [False, True])
+@pytest.mark.parametrize(
+    "branches,expected",
+    [
+        (
+            (("long", ("revolute", "fixed", "fixed")), ("active", ("revolute",) * 2)),
+            "active_1",
+        ),
+        (
+            (("short", ("revolute",) * 2), ("deep", ("revolute", "fixed", "revolute"))),
+            "deep_2",
+        ),
+        ((("a", ("revolute",)), ("z", ("revolute",))), "z_0"),
+    ],
+)
+def test_default_tip_prioritizes_active_joints_then_depth_then_name(
+    tmp_path, branches, expected, reverse_joints
+):
+    links = ['<link name="root"/>']
+    joints = []
+    for branch_name, kinds in branches:
+        parent = "root"
+        for index, kind in enumerate(kinds):
+            child = f"{branch_name}_{index}"
+            links.append(f'<link name="{child}"/>')
+            joints.append(
+                f'<joint name="{child}" type="{kind}"><parent link="{parent}"/>'
+                f'<child link="{child}"/><limit lower="-1" upper="1"/></joint>'
+            )
+            parent = child
+    if reverse_joints:
+        joints.reverse()
+    model = RobotModel.from_urdf(_write_urdf(tmp_path, "".join(links + joints)))
+    assert model.chain()[-1].child == expected
+    assert model.chain(expected) == ()
+
+
+def test_default_tip_stays_in_the_requested_tree_of_a_forest(tmp_path):
+    model = RobotModel.from_urdf(
+        _write_urdf(
+            tmp_path,
+            '<link name="base"/><link name="tool"/><link name="other"/>'
+            '<link name="other_mid"/><link name="other_tool"/>'
+            '<link name="isolated"/>'
+            '<joint name="arm" type="revolute"><parent link="base"/>'
+            '<child link="tool"/><limit lower="-1" upper="1"/></joint>'
+            '<joint name="other_a" type="revolute"><parent link="other"/>'
+            '<child link="other_mid"/><limit lower="-1" upper="1"/></joint>'
+            '<joint name="other_b" type="revolute"><parent link="other_mid"/>'
+            '<child link="other_tool"/><limit lower="-1" upper="1"/></joint>',
+        )
+    )
+    with pytest.raises(ValueError, match="forest"):
+        model.chain()
+    assert model.chain("base")[-1].child == "tool"
+    assert model.chain("other")[-1].child == "other_tool"
+    assert model.chain("isolated") == ()
+
+
 def test_unknown_chain_links_are_rejected():
     fixture = Path(__file__).parent / "fixtures/two_link.urdf"
     model = RobotModel.from_urdf(fixture)

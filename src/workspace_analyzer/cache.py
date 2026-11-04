@@ -64,10 +64,15 @@ class ResultCache:
 
 
 def analysis_cache_key(solver, mode: str, config) -> str:
-    """Fingerprint model content, selected chain, solver, mode, and config."""
+    """Fingerprint model content, compiled geometry, runtime, and analysis config."""
     payload = {
-        "schema": 5,
+        "schema": 6,
         "model": _model_digest(solver.model),
+        # A caller may edit model arrays after this solver compiled its snapshot.
+        "compiled_geometry": [
+            {"origin": _normalize(origin), "axis": _normalize(axis)}
+            for origin, axis, _ in solver._numpy_chain
+        ],
         "base_link": solver.base_link,
         "tip_link": solver.tip_link,
         "solver": _normalize(solver.config),
@@ -81,8 +86,7 @@ def analysis_cache_key(solver, mode: str, config) -> str:
 
 
 def _model_digest(model) -> str:
-    # Hash the parsed model used for computation. Its source may have changed
-    # or disappeared since construction, without changing this solver's model.
+    # Hash parsed content, independent of later source-file changes or deletion.
     description = {
         "name": model.name,
         "links": model.links,

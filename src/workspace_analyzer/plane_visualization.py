@@ -27,10 +27,13 @@ class PlaneReachabilityPanel:
         self._export_paths = {}
         self._export_errors = {}
         self._saved_paths = {}
+        self._export_running = False
         self._configured = False
-        with viewer.server.gui.add_folder(
+        folder = viewer.server.gui.add_folder(
             viewer._gui_prefix + "Plane reachability", order=-10
-        ):
+        )
+        viewer._gui_folders.append(folder)
+        with folder:
             gui = viewer.server.gui
             self.frame = gui.add_dropdown(
                 "Sampling frame", ("base", "world", "reference"), initial_value="base"
@@ -156,6 +159,8 @@ class PlaneReachabilityPanel:
             inputs=(self.viewer.solver.model.source,),
         )
         with self.viewer._lock:
+            if self.viewer._closed:
+                return
             if self.viewer._recompute_running:
                 raise RuntimeError("cannot configure a plane during computation")
             self._configured = False
@@ -301,6 +306,8 @@ class PlaneReachabilityPanel:
         with viewer._lock:
             if viewer._closed:
                 return
+            if self._export_running:
+                return
             if viewer._recompute_running:
                 self.info.content = (
                     "**Another computation is running.** "
@@ -329,6 +336,7 @@ class PlaneReachabilityPanel:
 
             def finish():
                 with viewer._lock:
+                    self._export_running = False
                     viewer._recompute_running = False
                     viewer._analysis_cancel = None
                     if not viewer._closed:
@@ -345,7 +353,11 @@ class PlaneReachabilityPanel:
 
             def progress(value):
                 with viewer._lock:
-                    if not viewer._closed and not cancel.is_set():
+                    if (
+                        not viewer._closed
+                        and viewer._analysis_cancel is cancel
+                        and not cancel.is_set()
+                    ):
                         self.info.content = (
                             f"**Computing {value:.1%}** · {plane.num_samples:,} targets"
                         )
@@ -361,10 +373,10 @@ class PlaneReachabilityPanel:
                         cancel_event=cancel,
                         progress_callback=progress,
                     )
+                    svg = plane_svg(result, max_points=5000)
                     with viewer._lock:
                         if viewer._closed or cancel.is_set():
                             raise AnalysisCancelled()
-                        svg = plane_svg(result, max_points=5000)
                         viewer.add_workspace(result)
                         self.result = result
                         self.download_json.disabled = False
@@ -402,12 +414,23 @@ class PlaneReachabilityPanel:
                         }
                         self._saved_paths = {}
                         self._export_errors = {}
-                        self._save_exports(self._export_paths)
+                        paths = self._export_paths.copy()
+                        self._export_running = True
+                        self.export_info.content = (
+                            "**Saving last completed run…**" if paths else ""
+                        )
+                        # The measured result is now published. Cancellation
+                        # applies to analysis, not these independent atomic saves.
+                        viewer._analysis_cancel = None
+                        self.cancel_button.disabled = True
+                    self._save_exports(result, paths)
                 except AnalysisCancelled:
                     with viewer._lock:
                         if not viewer._closed:
                             self.info.content = (
                                 "**Cancelled.** Previous completed result is retained."
+                                if self.result is not None
+                                else "**Cancelled.** No plane result has completed."
                             )
                 except Exception as exc:
                     with viewer._lock:
@@ -424,55 +447,81 @@ class PlaneReachabilityPanel:
                 finish()
                 self.info.content = f"**Computation failed to start:** {exc}"
 
-    def _save_exports(self, kinds):
-        """Save each artifact independently; preserve the computed result on failure."""
-        paths = {kind: self._export_paths[kind] for kind in kinds}
-        saved, errors = save_result_artifacts(self.result, paths, report_format="plane")
-        self._saved_paths.update(saved)
-        for kind in saved:
-            self._export_errors.pop(kind, None)
-        self._export_errors.update(errors)
-        lines = []
-        if self._saved_paths:
-            lines.append(
-                "**Saved last completed run:** "
-                + ", ".join(f"`{path}`" for path in self._saved_paths.values())
-            )
-        if self._export_errors:
-            lines.append("**Save failed (calculation is complete):**")
-            lines.extend(
-                f"- `{self._export_paths[kind]}`: {error}"
-                for kind, error in self._export_errors.items()
-            )
-            lines.append(
-                "The completed result remains available through downloads. "
-                "Fix the destination and click Retry saving; this does not rerun IK."
-            )
-        self.export_info.content = "\n\n".join(lines)
+    def _save_exports(self, result, paths):
+        """Write captured artifacts outside the viewer lock, then publish status.
+
+        Callers set _export_running while selecting the result and paths.
+        """
+        viewer = self.viewer
+        try:
+            try:
+                saved, errors = save_result_artifacts(
+                    result, paths, report_format="plane"
+                )
+            except Exception as exc:
+                saved, errors = {}, {kind: str(exc) for kind in paths}
+            with viewer._lock:
+                if viewer._closed or self.result is not result:
+                    return
+                self._saved_paths.update(saved)
+                for kind in saved:
+                    self._export_errors.pop(kind, None)
+                self._export_errors.update(errors)
+                lines = []
+                if self._saved_paths:
+                    lines.append(
+                        "**Saved last completed run:** "
+                        + ", ".join(f"`{path}`" for path in self._saved_paths.values())
+                    )
+                if self._export_errors:
+                    lines.append("**Save failed (calculation is complete):**")
+                    lines.extend(
+                        f"- `{self._export_paths[kind]}`: {error}"
+                        for kind, error in self._export_errors.items()
+                    )
+                    lines.append(
+                        "The completed result remains available through downloads. "
+                        "Fix the destination and click Retry saving; "
+                        "this does not rerun IK."
+                    )
+                self.export_info.content = "\n\n".join(lines)
+        finally:
+            with viewer._lock:
+                self._export_running = False
+                if not viewer._closed:
+                    self.compute_button.disabled = viewer._recompute_running
+                    self.retry_save.disabled = viewer._recompute_running or not bool(
+                        self._export_errors
+                    )
 
     def retry_exports(self):
         with self.viewer._lock:
             if (
                 self.viewer._closed
                 or self.viewer._recompute_running
+                or self._export_running
                 or self.result is None
                 or not self._export_errors
             ):
                 return
+            result = self.result
+            paths = {kind: self._export_paths[kind] for kind in self._export_errors}
+            self._export_running = True
+            self.compute_button.disabled = True
             self.retry_save.disabled = True
-            try:
-                self._save_exports(self._export_errors)
-            finally:
-                self.retry_save.disabled = not bool(self._export_errors)
+            self.export_info.content = "**Saving last completed run…**"
+        self._save_exports(result, paths)
 
     def cancel(self):
         with self.viewer._lock:
-            if self.viewer._analysis_cancel is not None:
+            if not self.viewer._closed and self.viewer._analysis_cancel is not None:
                 self.viewer._analysis_cancel.set()
                 self.info.content = "**Cancelling…**"
 
     def download(self, event, extension):
         with self.viewer._lock:
+            if self.viewer._closed:
+                return
             result = self.result
         if result is None or event.client is None:
             return
@@ -488,4 +537,6 @@ class PlaneReachabilityPanel:
                 path = Path(directory) / "plane.npz"
                 result.save(path)
                 content = path.read_bytes()
-        event.client.send_file_download(f"plane.{extension}", content)
+        with self.viewer._lock:
+            if not self.viewer._closed:
+                event.client.send_file_download(f"plane.{extension}", content)

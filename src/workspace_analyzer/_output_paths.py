@@ -22,17 +22,21 @@ def validate_artifact_paths(paths, *, inputs=()):
         name: None if path is None else Path(path) for name, path in paths.items()
     }
     occupied = [("input", Path(path)) for path in inputs if path is not None]
-    for name, path in destinations.items():
-        if path is None:
-            continue
-        if path.is_dir():
-            raise ValueError(f"{name} destination is a directory: {path}")
-        for other_name, other in occupied:
-            if path.resolve() == other.resolve() or (
-                path.exists() and other.exists() and path.samefile(other)
-            ):
-                raise ValueError(
-                    f"{name} and {other_name} must use distinct paths: {path}"
-                )
-        occupied.append((name, path))
+    try:
+        for name, path in destinations.items():
+            if path is None:
+                continue
+            if path.is_dir():
+                raise ValueError(f"{name} destination is a directory: {path}")
+            resolved = path.resolve()
+            for other_name, other in occupied:
+                if resolved == other.resolve() or (
+                    path.exists() and other.exists() and path.samefile(other)
+                ):
+                    raise ValueError(
+                        f"{name} and {other_name} must use distinct paths: {path}"
+                    )
+            occupied.append((name, path))
+    except RuntimeError as exc:
+        raise ValueError(f"cannot resolve artifact path: {exc}") from exc
     return destinations

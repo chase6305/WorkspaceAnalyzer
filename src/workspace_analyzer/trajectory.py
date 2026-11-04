@@ -41,7 +41,11 @@ class TrajectoryIKResult:
         return float(np.max(finite, initial=0.0))
 
     def summary(self) -> dict[str, float | int | None]:
-        """Return JSON-friendly continuity and dexterity diagnostics."""
+        """Return continuity diagnostics in joint coordinates (radians or metres).
+
+        Absolute path and velocity norms mix units on a mixed-joint chain.
+        Normalized jumps and closure errors divide each joint by its range.
+        """
 
         def finite_min(values):
             values = values[np.isfinite(values)]
@@ -86,7 +90,7 @@ def solve_trajectory(
 ) -> TrajectoryIKResult:
     """Solve an ordered path with previous-solution warm starts and diagnostics."""
     check_cancelled(cancel_event)
-    targets = np.asarray(_numpy(target_poses), dtype=float)
+    targets = np.array(_numpy(target_poses), dtype=float, copy=True)
     if targets.ndim != 3 or targets.shape[1:] != (4, 4) or len(targets) == 0:
         raise ValueError("target_poses must have shape (N, 4, 4) with N > 0")
     require_integer(failure_restarts, "failure_restarts", minimum=1)
@@ -118,7 +122,7 @@ def solve_trajectory(
     current = (
         solver.joint_limits.mean(axis=1)
         if seed is None
-        else np.asarray(seed, dtype=float)
+        else np.asarray(_numpy(seed), dtype=float)
     )
     if current.shape != (solver.dof,):
         raise ValueError(f"seed must have shape ({solver.dof},)")

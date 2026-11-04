@@ -89,26 +89,10 @@ class IKStabilityResult:
         ):
             raise ValueError("initial seeds must match the trial count")
         baseline = self.results[0]
-        flags, qualities = [], []
-        for index, result in enumerate(self.results):
-            check_cancelled(cancel_event)
-            reachable, metrics = _assessment_arrays(result)
-            if self.initial_seeds is not None and self.initial_seeds[index] is not None:
-                seed = np.asarray(self.initial_seeds[index])
-                joints = np.asarray(result.joint_positions)
-                if joints.ndim != 2 or len(joints) != len(reachable):
-                    raise ValueError("joint measurements must have shape (N, DoF)")
-                dof = joints.shape[1]
-                if (
-                    seed.dtype.kind not in "iuf"
-                    or not seed.size
-                    or not np.isfinite(seed).all()
-                    or seed.shape not in {(dof,), (1, dof), (len(reachable), dof)}
-                ):
-                    raise ValueError(
-                        "initial seed must be finite with compatible target/joint shape"
-                    )
-            quality = _validated_quality_flags(result, reachable, metrics)
+        baseline_reachable, baseline_metrics = _assessment_arrays(baseline)
+        check_cancelled(cancel_event)
+        shared_metadata = {
+            key: _normalize(baseline.metadata.get(key))
             for key in (
                 "robot",
                 "base_link",
@@ -127,20 +111,46 @@ class IKStabilityResult:
                 "joint_kinds",
                 "base_from_targets",
                 "collision_checked",
-            ):
-                if _normalize(result.metadata.get(key)) != _normalize(
-                    baseline.metadata.get(key)
+            )
+        }
+        shared_solver_settings = {
+            key: value
+            for key, value in baseline.metadata.get("solver_settings", {}).items()
+            if key not in {"max_iterations", "random_seed"}
+        }
+        flags, qualities = [], []
+        for index, result in enumerate(self.results):
+            check_cancelled(cancel_event)
+            reachable, metrics = (
+                (baseline_reachable, baseline_metrics)
+                if index == 0
+                else _assessment_arrays(result)
+            )
+            if self.initial_seeds is not None and self.initial_seeds[index] is not None:
+                seed = np.asarray(self.initial_seeds[index])
+                joints = np.asarray(result.joint_positions)
+                if joints.ndim != 2 or len(joints) != len(reachable):
+                    raise ValueError("joint measurements must have shape (N, DoF)")
+                dof = joints.shape[1]
+                if (
+                    seed.dtype.kind not in "iuf"
+                    or not seed.size
+                    or not np.isfinite(seed).all()
+                    or seed.shape not in {(dof,), (1, dof), (len(reachable), dof)}
                 ):
+                    raise ValueError(
+                        "initial seed must be finite with compatible target/joint shape"
+                    )
+            quality = _validated_quality_flags(result, reachable, metrics)
+            for key, expected in shared_metadata.items():
+                if _normalize(result.metadata.get(key)) != expected:
                     raise ValueError(f"stability results must share {key}")
-
-            def settings(item):
-                return {
-                    key: value
-                    for key, value in item.metadata.get("solver_settings", {}).items()
-                    if key not in {"max_iterations", "random_seed"}
-                }
-
-            if settings(result) != settings(baseline):
+            solver_settings = {
+                key: value
+                for key, value in result.metadata.get("solver_settings", {}).items()
+                if key not in {"max_iterations", "random_seed"}
+            }
+            if solver_settings != shared_solver_settings:
                 raise ValueError(
                     "stability results must share non-budget solver settings"
                 )

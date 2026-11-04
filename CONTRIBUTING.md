@@ -47,6 +47,8 @@ CI keeps a NumPy-only runtime matrix on Python 3.10/3.12, including the NumPy 1.
 lower bound on Python 3.10, and a separate Python 3.12
 job with Torch CPU, SciPy, Viser, and trimesh. The latter verifies imports and local
 socket support before running tests. Both jobs retain JUnit and robot reports.
+An additional Python 3.10 profile runs the full suite with NumPy 1.24, Torch 2.1,
+SciPy 1.10, Viser 1.1, and trimesh 4.0 to check the declared dependency minimums.
 To prepare the optional CPU profile locally, use the CPU distribution described
 in the [official PyTorch installation guide](https://pytorch.org/get-started/locally/):
 

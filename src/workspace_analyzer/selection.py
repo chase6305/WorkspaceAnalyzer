@@ -214,10 +214,17 @@ def _validated_candidates(study, *, cancel_event=None):
         residual = _numeric_array(result.residual, "residual")
         if residual.shape != ik[index].shape:
             raise ValueError("candidate residuals must have shape (N,)")
-        if np.any(
-            ik[index]
-            & (~np.isfinite(residual) | (residual < 0) | (residual > tolerance))
-        ) or not (np.isfinite(result.joint_positions[ik[index]]).all()):
+        # Failed solves usually also return finite configurations. Check that
+        # common case before copying even the much smaller Boolean row subset.
+        finite_joints = np.isfinite(joints)
+        valid_joints = finite_joints.all() or finite_joints[ik[index]].all()
+        if (
+            np.any(
+                ik[index]
+                & (~np.isfinite(residual) | (residual < 0) | (residual > tolerance))
+            )
+            or not valid_joints
+        ):
             raise ValueError(
                 "successful candidates require finite joints and residuals "
                 "within IK tolerance"

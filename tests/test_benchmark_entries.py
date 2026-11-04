@@ -55,6 +55,8 @@ def test_benchmark_entries_use_generic_chain_and_requested_counts(entry, tmp_pat
     if entry.startswith("stress"):
         assert data["batches"] == 1
         assert data["max_success_fk_position_error"] <= 1e-5
+        assert data["max_success_fk_rotation_error_rad"] <= 1e-5
+        assert data["max_success_fk_residual"] <= 1e-5
         assert data["max_joint_limit_violation"] == 0
         assert data["jacobian_columns_checked"] == [0]
     else:
@@ -109,3 +111,49 @@ def test_benchmark_report_cannot_replace_robot_input(entry, tmp_path):
     assert completed.returncode == 2
     assert "distinct paths" in completed.stderr
     assert robot.read_bytes() == original
+
+
+def test_stress_independently_rejects_incorrect_successful_orientation(
+    tmp_path, monkeypatch
+):
+    import numpy as np
+
+    from examples import stress_marvin
+    from workspace_analyzer import IKResult
+
+    robot = tmp_path / "rotation.urdf"
+    robot.write_text(
+        '<robot name="wrist"><link name="base"/><link name="tcp"/>'
+        '<joint name="wrist" type="revolute"><parent link="base"/>'
+        '<child link="tcp"/><axis xyz="0 0 1"/>'
+        '<limit lower="-3" upper="3"/></joint></robot>'
+    )
+
+    def incorrect_inverse(self, targets, **kwargs):
+        count = len(targets)
+        return IKResult(
+            np.zeros((count, self.dof)), np.ones(count, dtype=bool), np.zeros(count), 1
+        )
+
+    monkeypatch.setattr(stress_marvin.KinematicsSolver, "inverse", incorrect_inverse)
+    report = tmp_path / "report.json"
+    with pytest.raises(SystemExit, match="numerical accuracy threshold"):
+        stress_marvin.main(
+            [
+                "--urdf",
+                str(robot),
+                "--duration",
+                "1e-9",
+                "--batch-size",
+                "2",
+                "--ik-targets",
+                "3",
+                "--report",
+                str(report),
+            ]
+        )
+    data = json.loads(report.read_text())
+    assert data["max_success_fk_position_error"] == 0
+    assert data["max_success_residual"] == 0
+    assert data["max_success_fk_rotation_error_rad"] > 0.1
+    assert data["max_success_fk_residual"] > 0.1

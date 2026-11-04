@@ -225,6 +225,116 @@ def test_orientation_coverage_rejects_invalid_groups_and_nonpose_results(kind):
         result.orientation_coverage(ids, **kwargs)
 
 
+@pytest.mark.parametrize("tolerance", [0.0, 1e-210])
+@pytest.mark.parametrize("mismatch", ["poses", "group"])
+def test_coverage_rejects_subnormal_squared_position_distance(tolerance, mismatch):
+    result, ids = _pose_result()
+    # The actual distance is nonzero, even though its square rounds to zero.
+    result.points[:] = 0.0
+    result.target_poses[:, :3, 3] = 0.0
+    result.target_poses[4, 0, 3] = 1e-200
+    if mismatch == "group":
+        result.points[4, 0] = 1e-200
+    message = (
+        "match the assessment points" if mismatch == "poses" else "share a position"
+    )
+    with pytest.raises(ValueError, match=message):
+        result.orientation_coverage(ids, position_tolerance=tolerance)
+
+
+@pytest.mark.parametrize("mismatch", ["poses", "group"])
+def test_coverage_preserves_finite_large_position_distances(mismatch):
+    result, ids = _pose_result()
+    result.points[:] = 0.0
+    result.target_poses[:, :3, 3] = 0.0
+    result.target_poses[4, :2, 3] = 1e200
+    if mismatch == "group":
+        result.points[4, :2] = 1e200
+    with np.errstate(over="raise", invalid="raise"):
+        coverage = result.orientation_coverage(ids, position_tolerance=1.5e200)
+    np.testing.assert_array_equal(coverage.sample_counts, [3, 2])
+    with pytest.raises(ValueError):
+        result.orientation_coverage(ids, position_tolerance=1.4e200)
+
+
+@pytest.mark.parametrize("mismatch", ["poses", "group"])
+def test_coverage_rejects_overflowed_position_differences_without_warning(mismatch):
+    result, ids = _pose_result()
+    result.points[:] = -1e308
+    result.target_poses[:, :3, 3] = -1e308
+    result.target_poses[4, 0, 3] = 1e308
+    if mismatch == "group":
+        result.points[4, 0] = 1e308
+    with np.errstate(over="raise", invalid="raise"):
+        with pytest.raises(ValueError):
+            result.orientation_coverage(ids, position_tolerance=1e308)
+
+
+@pytest.mark.parametrize("mismatch", ["poses", "group"])
+def test_coverage_promotes_float32_before_position_subtraction(mismatch):
+    result, ids = _pose_result()
+    result.points = np.zeros_like(result.points, dtype=np.float32)
+    result.target_poses = result.target_poses.astype(np.float32)
+    result.points[:, 0] = -3e38
+    result.target_poses[:, :3, 3] = result.points
+    result.target_poses[4, 0, 3] = 3e38
+    if mismatch == "group":
+        result.points[4, 0] = 3e38
+    with np.errstate(over="raise", invalid="raise"):
+        with pytest.raises(ValueError):
+            result.orientation_coverage(ids, position_tolerance=5e38)
+        coverage = result.orientation_coverage(ids, position_tolerance=7e38)
+    np.testing.assert_array_equal(coverage.sample_counts, [3, 2])
+
+
+@pytest.mark.parametrize("mismatch", ["poses", "group"])
+@pytest.mark.parametrize(
+    "dtype,lower,upper,tolerance",
+    [
+        (np.int64, np.iinfo(np.int64).min, np.iinfo(np.int64).max, 2.0),
+        (np.uint64, np.iinfo(np.uint64).max, 0, 2.0),
+        (np.int64, 2**60, 2**60 + 1, 0.5),
+        (np.uint64, 2**63, 2**63 + 1, 0.5),
+    ],
+)
+def test_coverage_integer_distances_avoid_wrap_and_precision_loss(
+    mismatch, dtype, lower, upper, tolerance
+):
+    result, ids = _pose_result()
+    result.points = np.zeros_like(result.points, dtype=dtype)
+    result.target_poses = np.broadcast_to(
+        np.eye(4, dtype=dtype), result.target_poses.shape
+    ).copy()
+    result.points[:, 0] = lower
+    result.target_poses[:, :3, 3] = result.points
+    result.target_poses[4, 0, 3] = upper
+    if mismatch == "group":
+        result.points[4, 0] = upper
+    with np.errstate(over="raise", invalid="raise"):
+        with pytest.raises(ValueError):
+            result.orientation_coverage(ids, position_tolerance=tolerance)
+
+
+@pytest.mark.parametrize(
+    "point_dtype,pose_dtype", [(np.int64, np.uint64), (np.uint64, np.int64)]
+)
+def test_coverage_mixed_integer_dtypes_preserve_one_unit_position_mismatch(
+    point_dtype, pose_dtype
+):
+    result, ids = _pose_result()
+    result.points = np.zeros_like(result.points, dtype=point_dtype)
+    result.target_poses = np.broadcast_to(
+        np.eye(4, dtype=pose_dtype), result.target_poses.shape
+    ).copy()
+    result.points[:, 0] = 2**60
+    result.target_poses[:, :3, 3] = result.points
+    result.target_poses[4, 0, 3] = 2**60 + 1
+    with pytest.raises(ValueError, match="match the assessment points"):
+        result.orientation_coverage(ids, position_tolerance=0.5)
+    coverage = result.orientation_coverage(ids, position_tolerance=1.0)
+    np.testing.assert_array_equal(coverage.sample_counts, [3, 2])
+
+
 QUALITY_GATES = [
     ("isotropy", "minimum_isotropy"),
     ("joint_limit_margin", "minimum_joint_limit_margin"),

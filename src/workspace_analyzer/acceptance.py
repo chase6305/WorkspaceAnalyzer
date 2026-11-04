@@ -73,10 +73,13 @@ def reassess_acceptance(result, overrides=None, *, reset=False):
             }
         )
     config = AcceptanceConfig(**requirements)
-    if reset:
+    # An enabled replacement policy overwrites both saved verdicts below.
+    if reset and not config.enabled:
         metadata = deepcopy(result.metadata)
         metadata.pop("acceptance", None)
         if "plane_scan" in metadata:
+            if not isinstance(metadata["plane_scan"], dict):
+                raise ValueError("plane_scan metadata must be a dictionary")
             metadata["plane_scan"].pop("acceptance", None)
         result = replace(result, metadata=metadata)
     return apply_acceptance(result, config)
@@ -97,13 +100,19 @@ def apply_acceptance(result, config):
             raise ValueError(
                 "quality acceptance requires saved target quality measurements"
             )
-        quality = np.asarray(quality)
-        if (
-            quality.shape != (count,)
-            or quality.dtype.kind != "b"
-            or np.any(quality & ~result.reachable)
-        ):
-            raise ValueError("quality_pass must be Boolean and imply IK success")
+        if result.metadata.get("mode") == "targets":
+            from .reachability import _assessment_arrays, _validated_quality_flags
+
+            reachable, metrics = _assessment_arrays(result)
+            quality = _validated_quality_flags(result, reachable, metrics)
+        else:
+            quality = np.asarray(quality)
+            if (
+                quality.shape != (count,)
+                or quality.dtype.kind != "b"
+                or np.any(quality & ~result.reachable)
+            ):
+                raise ValueError("quality_pass must be Boolean and imply IK success")
         quality_rate = float(quality.mean()) if count else None
     failures = []
     if not count:
@@ -124,5 +133,7 @@ def apply_acceptance(result, config):
     metadata = deepcopy(result.metadata)
     metadata["acceptance"] = acceptance
     if "plane_scan" in metadata:
+        if not isinstance(metadata["plane_scan"], dict):
+            raise ValueError("plane_scan metadata must be a dictionary")
         metadata["plane_scan"]["acceptance"] = acceptance
     return replace(result, metadata=metadata)

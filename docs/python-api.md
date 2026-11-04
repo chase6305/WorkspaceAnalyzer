@@ -31,6 +31,12 @@ print(ik.success, ik.residual)
 A one-row batch stays a batch. Torch execution returns tensors on the selected
 device and preserves autograd; use `.detach().cpu().numpy()` for reporting.
 `forward_with_jacobian` shares the chain traversal between FK and the Jacobian.
+Joint-axis rotation coefficients are prepared once per solver and reused by FK,
+Jacobians, and IK iterations.
+The solver snapshots joint transforms and axes at construction; create a new
+solver after editing model geometry.
+Construction rejects nonfinite compiled geometry and joint limits that collapse
+or overflow in the selected dtype.
 
 Without explicit links, the URDF must have one root and the solver selects the
 leaf with the most active joints. Fixed transforms stay in the chain;
@@ -42,8 +48,13 @@ IK uses bounded damped least squares. `position_only=True` ignores target rotati
 retry failed targets. Always inspect `success` and `residual`: a failed numerical
 solve does not prove that a target is geometrically unreachable. Returned residuals
 correspond to the returned joints, including when the iteration budget is exhausted.
+Position-only residuals are `||Δx||₂`. Full-pose residuals are
+`sqrt(||Δx||₂² + (2 sin(θ/2))²)`, where θ is the principal rotation angle.
+They combine translation in metres with a dimensionless quaternion chord.
+The separate target-assessment `rotation_error` metric reports θ in radians.
 For float32 on NumPy or Torch CPU/CUDA, the small DLS system is solved in float64
-to retain damping near singularities; returned arrays and tensors stay float32.
+to reduce damping loss near singularities; returned arrays and tensors stay float32.
+Sufficiently small damping can still be lost to float64 rounding.
 
 ## Joint workspace
 
@@ -142,6 +153,8 @@ The Python reassessment call replaces all gates; unspecified gates are disabled.
 The `inspect` CLI preserves saved gates unless `--reset-quality-gates` is supplied.
 Neither operation searches for another IK branch. To choose among already measured
 configurations, see [candidate selection](candidate-selection.md).
+Quality acceptance validates saved flags against current measurements and gates;
+reassess quality after editing either before applying acceptance criteria.
 
 ## Dexterity and trajectories
 
@@ -165,11 +178,19 @@ The geometric Jacobian maps joint velocity to TCP linear/angular velocity:
 `[v, omega] = J(q) @ q_dot`. Position IK uses the first three rows. Singular values
 describe local dexterity; joint-limit margin is a separate configuration measure.
 Use `task="position"` or `"rotation"` to keep linear and angular units separate.
-Non-negative directional weights must include a positive value. Rank-deficient
-configurations have infinite condition numbers; exclude them from finite losses.
+Non-negative directional weights must include a positive value. Manipulability
+is the product of compact SVD singular values; minimum singular value, isotropy,
+and condition number also use that compact spectrum. A chain with fewer joints
+than task directions can therefore have finite condition number without full
+task rank. Numerically zero retained singular values give infinite condition
+numbers; exclude those entries from finite losses.
 
 Trajectory IK uses the previous successful configuration as its seed and reports
 joint jumps, velocity, acceleration, dexterity, and velocity-limit violations.
+Absolute joint metrics use radians for rotational joints and metres for prismatic
+joints. Their norms mix units on a mixed chain; normalized jumps and closure errors
+divide each joint by its range. Targets are snapshotted before solving, and Tensor
+targets and seeds are detached into this NumPy report workflow.
 Supply `dt` or explicit `timestamps` for time-based metrics. Continuous joints
 are unwrapped; failed frames invalidate adjacent continuity segments. Closed-loop
 refinement projects joints back onto target poses. For interactive trajectory
@@ -195,6 +216,8 @@ atomic. Use `compressed=False` for faster, larger local files; `ResultCache` acc
 the same option.
 
 Cache keys include the parsed model, chain, solver settings, and analysis inputs.
+They also fingerprint the solver's compiled geometry, so different geometry
+snapshots cannot share a measurement entry.
 Changing a source URDF after constructing a solver does not alter that solver;
 reconstruct it to load the new model. Quality-only changes can reuse target
 measurements. Cache encoding does not affect the key.
@@ -219,6 +242,8 @@ with ViserWorkspace(solver, port=8080, initial_q=q_reference) as viewer:
 Viser supports meshes and primitives, live joints, TCP frames, workspace colors,
 and trajectory playback. Large clouds are downsampled for display only. It runs
 a web service and does not need a desktop display server.
+Closing a viewer releases its panels and scene nodes. A supplied shared server
+stays running; use non-overlapping scene paths for each viewer.
 
 Further guides cover [target assessment](reachability-testing.md),
 [orientation coverage](reachability-testing.md), [perturbations](robustness-testing.md),

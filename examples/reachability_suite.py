@@ -103,30 +103,32 @@ def _run(args, parser):
         batch_size=args.batch_size,
         seed=args.seed,
     )
-    reference = default_reference_joints(solver)
-    pose = _numpy(solver.forward(reference))
+    reference_joints = default_reference_joints(solver)
+    reference_pose = _numpy(solver.forward(reference_joints))
     analyzer = WorkspaceAnalyzer(solver, WorkspaceConfig(sampling))
     results = {"joint_workspace": analyzer.analyze()}
-    points = results["joint_workspace"].points
+    workspace_points = results["joint_workspace"].points
     bounds = (
         np.asarray(args.bounds).reshape(3, 2)
         if args.bounds is not None
-        else np.stack((points.min(0) - 0.02, points.max(0) + 0.02), axis=1)
+        else np.stack(
+            (workspace_points.min(0) - 0.02, workspace_points.max(0) + 0.02), axis=1
+        )
     )
-    configs = {}
+    cartesian_configs = {}
     for name, position_only in (("position_ik", True), ("fixed_pose_ik", False)):
-        configs[name] = CartesianConfig(
+        cartesian_configs[name] = CartesianConfig(
             bounds=bounds,
             sampling=sampling,
             position_only=position_only,
             restarts=args.ik_restarts,
             rescue_restarts=args.ik_rescue_restarts,
             rescue_rounds=args.ik_rescue_rounds,
-            reference_pose=pose,
-            reference_joints=reference,
+            reference_pose=reference_pose,
+            reference_joints=reference_joints,
         )
         print(f"Computing {name} ({args.samples:,} targets)...", flush=True)
-        results[name] = analyzer.analyze_cartesian(configs[name])
+        results[name] = analyzer.analyze_cartesian(cartesian_configs[name])
     args.output_dir.mkdir(parents=True, exist_ok=True)
     reproduce_args = [
         "--urdf",
@@ -174,8 +176,8 @@ def _run(args, parser):
         "ik_rescue_restarts": args.ik_rescue_restarts,
         "ik_rescue_rounds": args.ik_rescue_rounds,
         "joint_names": list(solver.joint_names),
-        "reference_joints": reference.tolist(),
-        "reference_pose": pose.tolist(),
+        "reference_joints": reference_joints.tolist(),
+        "reference_pose": reference_pose.tolist(),
         "reproduce_args": reproduce_args,
         "base_link": solver.base_link,
         "tip_link": solver.tip_link,
@@ -185,6 +187,11 @@ def _run(args, parser):
     }
     saved, errors = {}, {}
     for name, result in results.items():
+        reachable_count = (
+            None
+            if result.reachable is None
+            else int(np.count_nonzero(result.reachable))
+        )
         try:
             result.save(paths[name])
         except Exception as exc:
@@ -195,12 +202,10 @@ def _run(args, parser):
             "artifact": f"{name}.npz",
             "saved": name in saved,
             "samples": len(result.points),
-            "reachable": None
-            if result.reachable is None
-            else int(result.reachable.sum()),
+            "reachable": reachable_count,
             "success_rate": None
-            if result.reachable is None
-            else float(result.reachable.mean()),
+            if reachable_count is None
+            else reachable_count / len(result.points),
         }
         if name in errors:
             summary["cases"][name]["export_error"] = errors[name]
@@ -228,7 +233,7 @@ def _run(args, parser):
         from workspace_analyzer.visualization import ViserWorkspace
 
         with ViserWorkspace(
-            solver, port=args.port, initial_q=reference, load_full_robot=True
+            solver, port=args.port, initial_q=reference_joints, load_full_robot=True
         ) as viewer:
             with viewer.server.gui.add_folder("Evaluation results", order=-20):
                 selector = viewer.server.gui.add_dropdown(
@@ -238,8 +243,10 @@ def _run(args, parser):
             def display(name):
                 with viewer._lock:
                     viewer.add_workspace(results[name])
-                    if name in configs:
-                        viewer.configure_cartesian_recompute(analyzer, configs[name])
+                    if name in cartesian_configs:
+                        viewer.configure_cartesian_recompute(
+                            analyzer, cartesian_configs[name]
+                        )
                     else:
                         viewer.configure_cartesian_recompute(None, None)
                     viewer.frame_view()

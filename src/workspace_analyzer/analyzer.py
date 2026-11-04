@@ -456,10 +456,11 @@ def _residual_summary(residual: np.ndarray, reachable: np.ndarray) -> dict:
     def stats(values):
         if not len(values):
             return None
+        median, percentile95 = np.percentile(values, [50, 95])
         return {
             "min": float(np.min(values)),
-            "median": float(np.median(values)),
-            "p95": float(np.percentile(values, 95)),
+            "median": float(median),
+            "p95": float(percentile95),
             "max": float(np.max(values)),
         }
 

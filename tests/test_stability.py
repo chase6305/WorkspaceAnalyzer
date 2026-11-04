@@ -285,6 +285,15 @@ def test_reports_reject_incomparable_or_invalid_measurements(kind):
         study.to_dict()
 
 
+@pytest.mark.parametrize(
+    "operation", ["to_dict", "select_solutions", "summarize_diversity"]
+)
+def test_offline_operations_reject_invalid_baseline_before_reading_metadata(operation):
+    study = IKStabilityResult(("first", "second"), (object(), object()))
+    with pytest.raises(ValueError, match="target assessment"):
+        getattr(study, operation)()
+
+
 @pytest.mark.parametrize("dtype", ["float32", "float64", "mixed"])
 def test_incremental_report_statistics_match_scalar_reference(dtype):
     study = analyze_ik_stability(

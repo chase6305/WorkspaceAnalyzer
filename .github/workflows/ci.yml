@@ -73,6 +73,33 @@ jobs:
             outputs/torch-workflow/report.*
             outputs/torch-workflow/stability/
 
+  optional-floor:
+    name: Optional dependency minimum versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install 'torch==2.1.0' --index-url https://download.pytorch.org/whl/cpu
+      - run: python -m pip install 'numpy==1.24.0' 'scipy==1.10.0' 'viser==1.1.0' 'trimesh==4.0.0' -e '.[dev]'
+      - name: Verify minimum optional runtimes
+        run: |
+          python - <<'PY'
+          import scipy
+          import torch
+          import trimesh
+          import viser
+          PY
+      - run: python -m pytest -q -ra --junitxml=outputs/optional-floor-tests.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: optional-floor
+          path: outputs/optional-floor-tests.xml
+
   quality:
     name: Lint and package
     runs-on: ubuntu-latest

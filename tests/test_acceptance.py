@@ -1,6 +1,8 @@
 """Acceptance preserves diagnostics and reports pass/fail through exit codes."""
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -307,3 +309,96 @@ def test_reset_quality_gates_preserves_run_acceptance(accepted_plane, capsys):
         metadata["acceptance"]["requirements"]
         == original.metadata["acceptance"]["requirements"]
     )
+
+
+@pytest.mark.parametrize("mutation", ["measurement", "flags", "thresholds"])
+def test_quality_acceptance_rejects_stale_target_flags_until_reassessed(
+    mutation, tmp_path
+):
+    result = analyze_plane(
+        create_solver(URDF, backend="numpy"),
+        PlaneConfig(resolution=3, span=1),
+        ReachabilityConfig(restarts=1, rescue_restarts=0, minimum_isotropy=0.5),
+    )
+    config = AcceptanceConfig(min_quality_pass_rate=1)
+    result = apply_acceptance(result, config)
+    if mutation == "measurement":
+        result.metrics["isotropy"][0] = 0
+    elif mutation == "flags":
+        result.metrics["quality_pass"][0] = False
+    else:
+        result.metadata["quality_thresholds"]["minimum_singular_value"] = 2
+    with pytest.raises(ValueError, match="quality flags disagree"):
+        apply_acceptance(result, config)
+    source = tmp_path / "stale.npz"
+    result.save(source)
+    original = source.read_bytes()
+    run = subprocess.run(
+        [sys.executable, "-m", "workspace_analyzer", "inspect", str(source)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert run.returncode == 2
+    assert "quality flags disagree" in run.stderr
+    assert "Traceback" not in run.stderr
+    assert source.read_bytes() == original
+    updated = result.reassess_quality(**result.metadata["quality_thresholds"])
+    assert updated.metadata["acceptance"]["passed"] == (mutation == "flags")
+
+
+def test_generic_quality_acceptance_keeps_boolean_flag_interface(monkeypatch):
+    import workspace_analyzer.reachability as reachability
+
+    monkeypatch.setattr(
+        reachability,
+        "_validated_quality_flags",
+        lambda *args: pytest.fail("generic flags must not require target measurements"),
+    )
+    result = AnalysisResult(
+        np.zeros((3, 3)),
+        np.zeros((3, 2)),
+        None,
+        {"mode": "custom"},
+        reachable=np.array([True, True, False]),
+        metrics={"quality_pass": np.array([True, False, False])},
+    )
+    updated = apply_acceptance(result, AcceptanceConfig(min_quality_pass_rate=1 / 3))
+    assert updated.metadata["acceptance"]["passed"]
+    assert updated.points is result.points
+    assert updated.metrics["quality_pass"] is result.metrics["quality_pass"]
+    assert result.metadata == {"mode": "custom"}
+
+
+@pytest.mark.parametrize("plane_scan", [None, "damaged", 3, []])
+@pytest.mark.parametrize("reset", [False, True])
+def test_invalid_plane_metadata_has_clean_acceptance_error(
+    plane_scan, reset, accepted_plane, tmp_path
+):
+    source, result = accepted_plane
+    result.metadata["plane_scan"] = plane_scan
+    result.save(source)
+    original = source.read_bytes()
+    output = tmp_path / "previous.npz"
+    output.write_bytes(b"previous completed result")
+    options = ["--reset-acceptance"] if reset else ["--min-success-rate", "0.5"]
+    run = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "workspace_analyzer",
+            "inspect",
+            str(source),
+            "--output",
+            str(output),
+            *options,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert run.returncode == 2
+    assert "plane_scan metadata must be a dictionary" in run.stderr
+    assert "Traceback" not in run.stderr
+    assert source.read_bytes() == original
+    assert output.read_bytes() == b"previous completed result"

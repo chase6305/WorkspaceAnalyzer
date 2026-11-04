@@ -22,6 +22,8 @@ from workspace_analyzer import (
     make_ik_seed_trials,
     refine_translation_boundary,
 )
+from workspace_analyzer._arrays import as_numpy as _numpy
+from workspace_analyzer._atomic import atomic_open, atomic_write_text
 
 
 def main(argv=None) -> int:
@@ -225,13 +227,13 @@ def run_workflow(args) -> dict:
         ]
     rng = np.random.default_rng(args.seed)
     limits = solver.joint_limits
-    known_q = limits.mean(1) + rng.uniform(
+    known_joints = limits.mean(1) + rng.uniform(
         -args.joint_fraction, args.joint_fraction, (args.samples, solver.dof)
     ) * (limits[:, 1] - limits[:, 0])
-    known = _numpy(solver.forward(known_q))
+    known_poses = _numpy(solver.forward(known_joints))
     perturbations = (
         PosePerturbations(
-            known,
+            known_poses,
             translation_m=args.perturb_translation_m,
             rotation_rad=np.deg2rad(args.perturb_rotation_deg),
         )
@@ -240,21 +242,22 @@ def run_workflow(args) -> dict:
     )
     if args.min_robust_rate is not None and len(perturbations.variant_names) == 1:
         raise ValueError("min-robust-rate requires at least one nonzero perturbation")
-    far, radius = _far_targets(solver)
-    position_targets = np.concatenate((known[:, :3, 3], far[:, :3, 3]))
-    pose_targets = np.concatenate((known, far))
-    local_targets = _orientation_targets(known, args.orientation_offset_deg)
+    far_poses, far_target_radius = _far_targets(solver)
+    position_targets = np.concatenate((known_poses[:, :3, 3], far_poses[:, :3, 3]))
+    pose_targets = np.concatenate((known_poses, far_poses))
+    orientation_targets = _orientation_targets(known_poses, args.orientation_offset_deg)
     position_ids = np.repeat(np.arange(args.samples), 3)
     output = args.output_dir
     output.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        output / "targets.npz",
-        targets=local_targets,
-        position_ids=position_ids,
-        known_joint_positions=known_q,
-        known_poses=known,
-        far_poses=far,
-    )
+    with atomic_open(output / "targets.npz") as stream:
+        np.savez_compressed(
+            stream,
+            targets=orientation_targets,
+            position_ids=position_ids,
+            known_joint_positions=known_joints,
+            known_poses=known_poses,
+            far_poses=far_poses,
+        )
     analyzer = WorkspaceAnalyzer(solver)
     cache = ResultCache(output / "cache")
     cases = {}
@@ -262,15 +265,20 @@ def run_workflow(args) -> dict:
     specifications = [
         ("position", position_targets, settings),
         ("pose", pose_targets, replace(settings, position_only=False)),
-        ("local_orientations", local_targets, replace(settings, position_only=False)),
+        (
+            "local_orientations",
+            orientation_targets,
+            replace(settings, position_only=False),
+        ),
     ]
     if perturbations is not None:
-        np.savez_compressed(
-            output / "perturbation_targets.npz",
-            targets=perturbations.targets,
-            reference_poses=perturbations.reference_poses,
-            variant_names=np.asarray(perturbations.variant_names),
-        )
+        with atomic_open(output / "perturbation_targets.npz") as stream:
+            np.savez_compressed(
+                stream,
+                targets=perturbations.targets,
+                reference_poses=perturbations.reference_poses,
+                variant_names=np.asarray(perturbations.variant_names),
+            )
         specifications.append(
             (
                 "perturbations",
@@ -294,7 +302,7 @@ def run_workflow(args) -> dict:
         }
         checks[f"{name}_far_targets"] = {
             "rejected": int(np.count_nonzero(~flags[args.samples :])),
-            "expected_rejections": len(far),
+            "expected_rejections": len(far_poses),
             "passed": bool(not flags[args.samples :].any()),
         }
         if args.min_quality_rate is not None:
@@ -333,11 +341,11 @@ def run_workflow(args) -> dict:
             }
     boundary = None
     if boundary_config is not None:
-        end_positions = known[:, :3, 3].copy()
+        end_positions = known_poses[:, :3, 3].copy()
         end_positions[:, 0] += args.boundary_distance_m
         refined = refine_translation_boundary(
             solver,
-            known,
+            known_poses,
             end_positions,
             boundary_config,
             reachability=replace(settings, position_only=False),
@@ -395,9 +403,9 @@ def run_workflow(args) -> dict:
         stability["diversity"] = None
         if args.candidate_diversity:
             diversity = study.summarize_diversity(diversity_config)
-            (output / "stability/diversity.json").write_text(
+            atomic_write_text(
+                output / "stability/diversity.json",
                 json.dumps(diversity, indent=2, allow_nan=False) + "\n",
-                encoding="utf-8",
             )
             stability["diversity"] = diversity
         stability["selection"] = None
@@ -448,7 +456,7 @@ def run_workflow(args) -> dict:
         "passed": all(check["passed"] for check in checks.values()),
         "checks": checks,
         "cases": cases,
-        "far_target_radius_m": radius,
+        "far_target_radius_m": far_target_radius,
         "orientation_offsets_deg": [
             0.0,
             args.orientation_offset_deg,
@@ -466,10 +474,10 @@ def run_workflow(args) -> dict:
             "no collision checks"
         ),
     }
-    (output / "report.json").write_text(
-        json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+    atomic_write_text(
+        output / "report.json", json.dumps(report, indent=2, allow_nan=False) + "\n"
     )
-    (output / "report.md").write_text(_markdown(report), encoding="utf-8")
+    atomic_write_text(output / "report.md", _markdown(report))
     return report
 
 
@@ -486,19 +494,21 @@ def _far_targets(solver):
         )
         for joint in solver.chain
     )
-    radius = 2 * bound + 1.0
+    far_target_radius = 2 * bound + 1.0
     targets = np.broadcast_to(np.eye(4, dtype=solver.config.dtype), (6, 4, 4)).copy()
-    targets[:, :3, 3] = np.concatenate((np.eye(3), -np.eye(3))) * radius
-    return targets, radius
+    targets[:, :3, 3] = np.concatenate((np.eye(3), -np.eye(3))) * far_target_radius
+    return targets, far_target_radius
 
 
-def _orientation_targets(known, offset_deg):
-    offsets = np.broadcast_to(np.eye(3, dtype=known.dtype), (3, 3, 3)).copy()
+def _orientation_targets(known_poses, offset_deg):
+    offsets = np.broadcast_to(np.eye(3, dtype=known_poses.dtype), (3, 3, 3)).copy()
     for index, angle in ((1, np.deg2rad(offset_deg)), (2, -np.deg2rad(offset_deg))):
         c, s = np.cos(angle), np.sin(angle)
         offsets[index] = [[1, 0, 0], [0, c, -s], [0, s, c]]
-    targets = np.repeat(known, 3, axis=0)
-    targets[:, :3, :3] = (known[:, None, :3, :3] @ offsets[None]).reshape(-1, 3, 3)
+    targets = np.repeat(known_poses, 3, axis=0)
+    targets[:, :3, :3] = (known_poses[:, None, :3, :3] @ offsets[None]).reshape(
+        -1, 3, 3
+    )
     return targets
 
 
@@ -514,10 +524,10 @@ def _markdown(report):
         "| --- | ---: | ---: | ---: |",
     ]
     for name, case in report["cases"].items():
-        a = case["assessment"]
+        assessment = case["assessment"]
         lines.append(
-            f"| {name} | {a['samples']} | {a['ik_success_count']} "
-            f"| {a['quality_pass_count']} |"
+            f"| {name} | {assessment['samples']} | {assessment['ik_success_count']} "
+            f"| {assessment['quality_pass_count']} |"
         )
     lines.extend(
         [
@@ -627,11 +637,13 @@ def _markdown(report):
             ]
         )
         for trial in stability["trials"]:
-            m = trial["metadata"]
+            metadata = trial["metadata"]
+            assessment = metadata["assessment"]
             lines.append(
-                f"| {trial['name']} | {m['solver_settings']['max_iterations']} | "
-                f"{m['random_seed']} | {m['assessment']['ik_success_count']} | "
-                f"{m['assessment']['quality_pass_count']} |"
+                f"| {trial['name']} | "
+                f"{metadata['solver_settings']['max_iterations']} | "
+                f"{metadata['random_seed']} | {assessment['ik_success_count']} | "
+                f"{assessment['quality_pass_count']} |"
             )
         lines.extend(
             [
@@ -707,12 +719,6 @@ def _markdown(report):
         ]
     )
     return "\n".join(lines)
-
-
-def _numpy(value):
-    return (
-        value.detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value)
-    )
 
 
 if __name__ == "__main__":

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 import zlib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -12,6 +10,8 @@ from zipfile import BadZipFile
 
 import numpy as np
 
+from ._arrays import as_numpy as _numpy
+from ._atomic import atomic_open
 from ._cancellation import AnalysisCancelled as AnalysisCancelled
 from ._cancellation import check_cancelled
 from ._validation import require_integer
@@ -20,7 +20,7 @@ from .kinematics import (
     _validate_homogeneous_rows,
     _validate_rotation_matrices,
 )
-from .metrics import _joint_limit_margin_numpy
+from .metrics import _dexterity_from_jacobian
 from .sampling import SamplingConfig, SamplingStrategy, sample
 
 
@@ -32,7 +32,11 @@ class WorkspaceConfig:
 
 @dataclass(frozen=True)
 class CartesianConfig:
-    """Cartesian target sampling and IK settings; equal bounds fix an axis."""
+    """Cartesian target sampling and IK settings; equal bounds fix an axis.
+
+    SamplingConfig.seed controls target sampling. IK restarts use the solver's
+    SolverConfig.random_seed, allowing these seeds to be varied independently.
+    """
 
     bounds: np.ndarray
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
@@ -155,7 +159,6 @@ class AnalysisResult:
         # snapshot before replacing an existing archive, without mutating self.
         snapshot = replace(self)
         target = Path(path).with_suffix(".npz")
-        target.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "format_version": np.asarray(self.FORMAT_VERSION, dtype=np.int64),
             "points": snapshot.points,
@@ -170,19 +173,9 @@ class AnalysisResult:
             if not isinstance(name, str) or not name.replace("_", "").isalnum():
                 raise ValueError(f"invalid metric name {name!r}")
             payload[f"metric__{name}"] = np.asarray(value)
-        with tempfile.NamedTemporaryFile(
-            dir=target.parent,
-            prefix=f".{target.stem}-",
-            suffix=".npz",
-            delete=False,
-        ) as temporary:
-            temporary_path = Path(temporary.name)
-        try:
+        with atomic_open(target) as stream:
             writer = np.savez_compressed if compressed else np.savez
-            writer(temporary_path, **payload)
-            os.replace(temporary_path, target)
-        finally:
-            temporary_path.unlink(missing_ok=True)
+            writer(stream, **payload)
 
     @classmethod
     def load(cls, path: str | Path) -> AnalysisResult:
@@ -210,11 +203,11 @@ class AnalysisResult:
             return cls(
                 points=archive["points"],
                 joint_positions=archive["joint_positions"],
-                manipulability=_optional_array(archive, "manipulability"),
+                manipulability=archive.get("manipulability"),
                 metadata=json.loads(str(archive["metadata_json"])),
-                reachable=_optional_array(archive, "reachable"),
-                residual=_optional_array(archive, "residual"),
-                target_poses=_optional_array(archive, "target_poses"),
+                reachable=archive.get("reachable"),
+                residual=archive.get("residual"),
+                target_poses=archive.get("target_poses"),
                 metrics={
                     name[len("metric__") :]: archive[name]
                     for name in archive.files
@@ -297,7 +290,7 @@ class WorkspaceAnalyzer:
         batch = self.config.sampling.batch_size
         for start in range(0, len(q), batch):
             check_cancelled(cancel_event)
-            qb = q[start : start + batch]
+            qb = self.solver._array(q[start : start + batch])
             selection = slice(start, start + len(qb))
             if self.config.compute_jacobians:
                 pose, jac = self.solver.forward_with_jacobian(qb)
@@ -305,34 +298,23 @@ class WorkspaceAnalyzer:
                 pose = self.solver.forward(qb)
             points[selection] = _numpy(pose[:, :3, 3])
             if self.config.compute_jacobians:
-                margin_values[selection] = _joint_limit_margin_numpy(self.solver, qb)
-                if hasattr(jac, "detach"):
+                quality = _dexterity_from_jacobian(
+                    self.solver, qb, jac, task="position"
+                )
+                values = (
+                    quality.manipulability,
+                    quality.minimum_singular_value,
+                    quality.isotropy,
+                    quality.joint_limit_margin,
+                )
+                if self.solver.backend == "torch":
                     import torch
 
-                    singular = torch.linalg.svdvals(jac[:, :3])
-                    values = _numpy(
-                        torch.stack(
-                            (
-                                torch.prod(singular, dim=1),
-                                singular[:, -1],
-                                singular[:, -1] / singular[:, 0].clamp_min(1e-30),
-                            ),
-                            dim=1,
-                        )
-                    )
-                    scores[selection] = values[:, 0]
-                    minimum_values[selection] = values[:, 1]
-                    isotropy_values[selection] = values[:, 2]
-                else:
-                    singular = np.linalg.svd(jac[:, :3], compute_uv=False)
-                    scores[selection] = np.prod(singular, axis=1)
-                    minimum_values[selection] = singular[:, -1]
-                    isotropy_values[selection] = np.divide(
-                        singular[:, -1],
-                        singular[:, 0],
-                        out=np.zeros_like(singular[:, 0]),
-                        where=singular[:, 0] > 0,
-                    )
+                    values = _numpy(torch.stack(values))
+                for destination, value in zip(
+                    (scores, minimum_values, isotropy_values, margin_values), values
+                ):
+                    destination[selection] = value
             check_cancelled(cancel_event)
             if progress_callback is not None:
                 progress_callback((start + len(qb)) / len(q))
@@ -440,6 +422,8 @@ class WorkspaceAnalyzer:
                 "sampling_seed": config.sampling.seed,
                 "batch_size": config.sampling.batch_size,
                 "mode": "cartesian",
+                "ik_random_seed": self.solver.config.random_seed,
+                "solver_settings": vars(self.solver.config).copy(),
                 "position_only": config.position_only,
                 "restarts": config.restarts,
                 "rescue_restarts": config.rescue_restarts,
@@ -461,16 +445,6 @@ class WorkspaceAnalyzer:
         return result
 
 
-def _numpy(value):
-    return (
-        value.detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value)
-    )
-
-
-def _optional_array(archive, name: str):
-    return archive[name] if name in archive.files else None
-
-
 def _numeric_array(value, name: str):
     array = np.asarray(value)
     if array.dtype.kind not in "biuf":
@@ -482,10 +456,11 @@ def _residual_summary(residual: np.ndarray, reachable: np.ndarray) -> dict:
     def stats(values):
         if not len(values):
             return None
+        median, percentile95 = np.percentile(values, [50, 95])
         return {
             "min": float(np.min(values)),
-            "median": float(np.median(values)),
-            "p95": float(np.percentile(values, 95)),
+            "median": float(median),
+            "p95": float(percentile95),
             "max": float(np.max(values)),
         }
 

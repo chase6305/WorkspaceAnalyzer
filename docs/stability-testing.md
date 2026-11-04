@@ -119,6 +119,9 @@ study.save("outputs/study")
 名称只作为显示标签。工作流将目录放在 `stability/`，并在总报告中保存输入来源
 文件和原始行号映射；总报告中试验文件路径相对于该子目录。
 
+每份 NPZ 和 JSON 都在写入完成后独立替换；单份写入失败会保留该文件的旧版本。
+整个目录不是跨文件事务，保存失败后应检查诊断并重新保存完整研究。
+
 ```python
 from workspace_analyzer import IKStabilityResult
 

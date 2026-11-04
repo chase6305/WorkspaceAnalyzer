@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ._atomic import atomic_open, atomic_write_text
 from ._cancellation import check_cancelled
 from ._validation import require_integer
 from .analyzer import AnalysisResult
@@ -48,7 +49,7 @@ class BoundaryResult:
     initial_brackets: np.ndarray
 
     def to_dict(self) -> dict:
-        m = self.measurements
+        measurements = self.measurements
         rows = []
         for index, (lower, upper) in enumerate(
             zip(self.lower_indices, self.upper_indices)
@@ -59,18 +60,22 @@ class BoundaryResult:
                     "status": str(self.statuses[index]),
                     "rounds": int(self.rounds[index]),
                     "initial_bracket": bool(self.initial_brackets[index]),
-                    "width_m": float(_distance(m.points[upper], m.points[lower])),
+                    "width_m": float(
+                        _distance(
+                            measurements.points[upper], measurements.points[lower]
+                        )
+                    ),
                     "lower": self._endpoint(lower, index),
                     "upper": self._endpoint(upper, index),
                 }
             )
         return {
-            "metadata": deepcopy(m.metadata),
+            "metadata": deepcopy(measurements.metadata),
             "summary": {
                 "segments": len(rows),
                 "initial_brackets": int(self.initial_brackets.sum()),
                 "refined": int(np.count_nonzero(self.statuses == "refined")),
-                "target_evaluations": len(m.points),
+                "target_evaluations": len(measurements.points),
                 "status_counts": {
                     str(status): int(np.count_nonzero(self.statuses == status))
                     for status in np.unique(self.statuses)
@@ -80,38 +85,38 @@ class BoundaryResult:
         }
 
     def _endpoint(self, sample, segment):
-        m = self.measurements
-        residual = float(m.residual[sample])
+        measurements = self.measurements
+        residual = float(measurements.residual[sample])
         return {
             "sample_index": int(sample),
             "parameter": float(self.parameters[sample]),
-            "offset_m": float(_distance(m.points[sample], m.points[segment])),
-            "point": m.points[sample].tolist(),
-            "ik_success": bool(m.reachable[sample]),
+            "offset_m": float(
+                _distance(measurements.points[sample], measurements.points[segment])
+            ),
+            "point": measurements.points[sample].tolist(),
+            "ik_success": bool(measurements.reachable[sample]),
             "residual": residual if np.isfinite(residual) else None,
-            "quality_pass": bool(m.metrics["quality_pass"][sample]),
+            "quality_pass": bool(measurements.metrics["quality_pass"][sample]),
         }
 
     def save(self, directory: str | Path) -> None:
         """Save measurements, sample-to-segment mapping, and strict JSON report."""
+        report = json.dumps(self.to_dict(), indent=2, allow_nan=False) + "\n"
         directory = Path(directory)
-        directory.mkdir(parents=True, exist_ok=True)
         self.measurements.save(directory / "measurements.npz")
-        np.savez_compressed(
-            directory / "trace.npz",
-            segment_ids=self.segment_ids,
-            parameters=self.parameters,
-            stages=self.stages,
-            lower_indices=self.lower_indices,
-            upper_indices=self.upper_indices,
-            statuses=self.statuses,
-            rounds=self.rounds,
-            initial_brackets=self.initial_brackets,
-        )
-        (directory / "report.json").write_text(
-            json.dumps(self.to_dict(), indent=2, allow_nan=False) + "\n",
-            encoding="utf-8",
-        )
+        with atomic_open(directory / "trace.npz") as stream:
+            np.savez_compressed(
+                stream,
+                segment_ids=self.segment_ids,
+                parameters=self.parameters,
+                stages=self.stages,
+                lower_indices=self.lower_indices,
+                upper_indices=self.upper_indices,
+                statuses=self.statuses,
+                rounds=self.rounds,
+                initial_brackets=self.initial_brackets,
+            )
+        atomic_write_text(directory / "report.json", report)
 
 
 def refine_translation_boundary(
@@ -152,7 +157,7 @@ def refine_translation_boundary(
     start_points = poses[:, :3, 3].copy()
     # Parameters use float64, while actual evaluated points respect solver dtype.
     displacement = ends.astype(np.float64) - start_points.astype(np.float64)
-    lengths = np.linalg.norm(displacement, axis=1)
+    lengths = np.hypot.reduce(displacement, axis=1)
     if not np.isfinite(lengths).all() or np.any(lengths == 0):
         raise ValueError("translation segments must have finite nonzero length")
     chunks, segment_chunks, parameter_chunks, stage_chunks = [], [], [], []
@@ -298,7 +303,7 @@ def refine_translation_boundary(
 
 
 def _distance(first, second):
-    return np.linalg.norm(
+    return np.hypot.reduce(
         np.asarray(first, dtype=np.float64) - np.asarray(second, dtype=np.float64),
         axis=-1,
     )

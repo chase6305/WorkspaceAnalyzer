@@ -95,13 +95,11 @@ def summarize_orientation_coverage(
     if (
         poses.shape != (len(ids), 4, 4)
         or not np.isfinite(poses).all()
-        or np.any(np.linalg.norm(poses[:, :3, 3] - points, axis=1) > position_tolerance)
+        or np.any(_position_distances(poses[:, :3, 3], points) > position_tolerance)
     ):
         raise ValueError("target_poses must match the assessment points")
     accepted = _validated_quality_flags(result, reachable, metrics)
     weights = metrics["task_weight"]
-    if not np.isfinite(weights).all() or np.any(weights < 0):
-        raise ValueError("task weights must be finite and non-negative")
     check_cancelled(cancel_event)
     _, first, inverse = np.unique(ids, return_index=True, return_inverse=True)
     check_cancelled(cancel_event)
@@ -112,7 +110,7 @@ def summarize_orientation_coverage(
     first = first[order]
     representative = points[first].copy()
     if np.any(
-        np.linalg.norm(points - representative[inverse], axis=1) > position_tolerance
+        _position_distances(points, representative[inverse]) > position_tolerance
     ):
         raise ValueError("all poses with the same position_id must share a position")
     groups = len(first)
@@ -124,8 +122,9 @@ def summarize_orientation_coverage(
     # overall mass is negligible compared with the rest of the task set.
     maximum = np.zeros(groups)
     np.maximum.at(maximum, inverse, weights)
+    group_maximum = maximum[inverse]
     scaled = np.divide(
-        weights, maximum[inverse], out=np.zeros(len(ids)), where=maximum[inverse] > 0
+        weights, group_maximum, out=np.zeros(len(ids)), where=group_maximum > 0
     )
     mass = np.bincount(inverse, weights=scaled, minlength=groups)
     weighted = []
@@ -162,3 +161,29 @@ def summarize_orientation_coverage(
     )
     check_cancelled(cancel_event)
     return result
+
+
+def _position_distances(points, reference):
+    if (
+        points.dtype != reference.dtype
+        and points.dtype.kind in "iu"
+        and reference.dtype.kind in "iu"
+    ):
+        # Preserve integer differences before any mixed-dtype float promotion.
+        distance = points.astype(object) - reference.astype(object)
+        return np.hypot.reduce(distance.astype(np.float64), axis=1)
+    if np.array_equal(points, reference):
+        return np.zeros(len(points))
+    if points.dtype.kind in "iu" and points.dtype == reference.dtype:
+        # Ordered unsigned subtraction preserves small differences between large
+        # integers and can also hold the full span of signed int64 coordinates.
+        distance = np.maximum(points, reference).astype(np.uint64)
+        distance -= np.minimum(points, reference).astype(np.uint64)
+        return np.hypot.reduce(distance, axis=1, dtype=np.float64)
+    # Promote before subtraction: a float32 difference can overflow even when
+    # its distance and the caller's tolerance are both finite in float64.
+    with np.errstate(over="ignore"):
+        distance = np.subtract(
+            points, reference, dtype=np.result_type(points, reference, np.float64)
+        )
+        return np.hypot.reduce(distance, axis=1)

@@ -114,7 +114,7 @@ def summarize_ik_diversity(study, config=None, *, joint_kinds=None, cancel_event
     for index, result in enumerate(study.results):
         check_cancelled(cancel_event)
         remaining = ik[index].copy()
-        remaining_count = int(remaining.sum())
+        success_count = remaining_count = int(remaining.sum())
         for prior in representative_trials:
             check_cancelled(cancel_event)
             if remaining_count == 0:
@@ -122,20 +122,17 @@ def summarize_ik_diversity(study, config=None, *, joint_kinds=None, cancel_event
             rows = np.flatnonzero(remaining & (labels[prior] == prior))
             if not len(rows):
                 continue
-            current = result.joint_positions[rows].astype(np.float64, copy=False)
-            reference = (
-                study.results[prior]
-                .joint_positions[rows]
-                .astype(np.float64, copy=False)
-            )
+            current = result.joint_positions[rows]
+            reference = study.results[prior].joint_positions[rows]
             # Very distant finite coordinates can overflow subtraction; inf is
             # correctly outside tolerance. Periodic subtraction stays bounded.
             with np.errstate(over="ignore"):
-                distance = np.abs(current - reference)
+                distance = np.subtract(current, reference, dtype=np.float64)
+            np.abs(distance, out=distance)
             if has_periodic:
                 wrapped = np.abs(
-                    np.remainder(current[:, periodic], 2 * np.pi)
-                    - np.remainder(reference[:, periodic], 2 * np.pi)
+                    np.remainder(current[:, periodic], 2 * np.pi, dtype=np.float64)
+                    - np.remainder(reference[:, periodic], 2 * np.pi, dtype=np.float64)
                 )
                 distance[:, periodic] = np.minimum(wrapped, 2 * np.pi - wrapped)
             matched = rows[np.all(distance <= tolerances, axis=1)]
@@ -156,11 +153,9 @@ def summarize_ik_diversity(study, config=None, *, joint_kinds=None, cancel_event
             {
                 "trial_index": index,
                 "name": study.names[index],
-                "ik_success_count": int(ik[index].sum()),
+                "ik_success_count": success_count,
                 "new_configuration_count": remaining_count,
-                "duplicate_candidate_count": int(
-                    np.count_nonzero(ik[index] & ~remaining)
-                ),
+                "duplicate_candidate_count": success_count - remaining_count,
                 "new_quality_configuration_count": int(new_quality.sum()),
                 "cumulative_configuration_count": int(unique.sum()),
             }

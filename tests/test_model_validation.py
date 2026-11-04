@@ -57,6 +57,72 @@ def test_invalid_urdf_is_rejected(tmp_path, body, message):
         RobotModel.from_urdf(_write_urdf(tmp_path, body))
 
 
+def test_malformed_urdf_xml_reports_the_input_path(tmp_path):
+    source = _write_urdf(tmp_path, '<link name="base">')
+    with pytest.raises(ValueError, match="invalid URDF XML") as error:
+        RobotModel.from_urdf(source)
+    assert str(source) in str(error.value)
+
+
+@pytest.mark.parametrize("reverse_joints", [False, True])
+@pytest.mark.parametrize(
+    "branches,expected",
+    [
+        (
+            (("long", ("revolute", "fixed", "fixed")), ("active", ("revolute",) * 2)),
+            "active_1",
+        ),
+        (
+            (("short", ("revolute",) * 2), ("deep", ("revolute", "fixed", "revolute"))),
+            "deep_2",
+        ),
+        ((("a", ("revolute",)), ("z", ("revolute",))), "z_0"),
+    ],
+)
+def test_default_tip_prioritizes_active_joints_then_depth_then_name(
+    tmp_path, branches, expected, reverse_joints
+):
+    links = ['<link name="root"/>']
+    joints = []
+    for branch_name, kinds in branches:
+        parent = "root"
+        for index, kind in enumerate(kinds):
+            child = f"{branch_name}_{index}"
+            links.append(f'<link name="{child}"/>')
+            joints.append(
+                f'<joint name="{child}" type="{kind}"><parent link="{parent}"/>'
+                f'<child link="{child}"/><limit lower="-1" upper="1"/></joint>'
+            )
+            parent = child
+    if reverse_joints:
+        joints.reverse()
+    model = RobotModel.from_urdf(_write_urdf(tmp_path, "".join(links + joints)))
+    assert model.chain()[-1].child == expected
+    assert model.chain(expected) == ()
+
+
+def test_default_tip_stays_in_the_requested_tree_of_a_forest(tmp_path):
+    model = RobotModel.from_urdf(
+        _write_urdf(
+            tmp_path,
+            '<link name="base"/><link name="tool"/><link name="other"/>'
+            '<link name="other_mid"/><link name="other_tool"/>'
+            '<link name="isolated"/>'
+            '<joint name="arm" type="revolute"><parent link="base"/>'
+            '<child link="tool"/><limit lower="-1" upper="1"/></joint>'
+            '<joint name="other_a" type="revolute"><parent link="other"/>'
+            '<child link="other_mid"/><limit lower="-1" upper="1"/></joint>'
+            '<joint name="other_b" type="revolute"><parent link="other_mid"/>'
+            '<child link="other_tool"/><limit lower="-1" upper="1"/></joint>',
+        )
+    )
+    with pytest.raises(ValueError, match="forest"):
+        model.chain()
+    assert model.chain("base")[-1].child == "tool"
+    assert model.chain("other")[-1].child == "other_tool"
+    assert model.chain("isolated") == ()
+
+
 def test_unknown_chain_links_are_rejected():
     fixture = Path(__file__).parent / "fixtures/two_link.urdf"
     model = RobotModel.from_urdf(fixture)
@@ -102,3 +168,42 @@ def test_finite_axes_normalize_without_overflow_or_underflow(tmp_path, scale):
     np.testing.assert_allclose(rotation @ rotation.T, np.eye(3), atol=1e-12)
     np.testing.assert_allclose(rotation @ axis, axis, atol=1e-12)
     assert np.trace(rotation) == pytest.approx(1 + 2 * np.cos(0.5))
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    ["two_link.urdf", "mixed_chain.urdf", "cartesian_stage.urdf", "continuous.urdf"],
+)
+def test_zero_tree_transforms_match_chain_fk(fixture):
+    from workspace_analyzer import KinematicsSolver, SolverConfig
+
+    model = RobotModel.from_urdf(Path(__file__).parent / "fixtures" / fixture)
+    solver = KinematicsSolver(model, config=SolverConfig(backend="numpy"))
+    neutral = model.zero_transforms()
+    assert set(neutral) == set(model.links)
+    for link, transform in solver.forward(np.zeros(solver.dof), all_links=True).items():
+        np.testing.assert_allclose(neutral[link], transform, atol=1e-12)
+    neutral[solver.tip_link][:] = 0
+    assert np.linalg.det(model.zero_transforms()[solver.tip_link]) == pytest.approx(1)
+
+
+def test_zero_tree_transforms_include_branches_and_disconnected_roots(tmp_path):
+    model = RobotModel.from_urdf(
+        _write_urdf(
+            tmp_path,
+            '<link name="root"/><link name="arm"/><link name="tool"/>'
+            '<link name="sensor"/><link name="detached"/>'
+            '<joint name="tool" type="fixed"><parent link="arm"/>'
+            '<child link="tool"/><origin xyz="0 2 0"/></joint>'
+            '<joint name="sensor" type="fixed"><parent link="root"/>'
+            '<child link="sensor"/><origin xyz="0 0 3"/></joint>'
+            '<joint name="arm" type="prismatic"><parent link="root"/>'
+            '<child link="arm"/><origin xyz="1 0 0"/>'
+            '<limit lower="1" upper="2"/></joint>',
+        )
+    )
+    poses = model.zero_transforms()
+    assert set(poses) == set(model.links)
+    np.testing.assert_allclose(poses["tool"][:3, 3], [1, 2, 0])
+    np.testing.assert_allclose(poses["sensor"][:3, 3], [0, 0, 3])
+    np.testing.assert_array_equal(poses["detached"], np.eye(4))

@@ -6,14 +6,19 @@ import threading
 import time
 import warnings
 import xml.etree.ElementTree as ET
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 
-from .analyzer import AnalysisCancelled, AnalysisResult
+from ._arrays import as_numpy as _numpy
+from ._validation import require_integer, require_port
+from .analyzer import AnalysisCancelled, AnalysisResult, CartesianConfig
 from .kinematics import KinematicsSolver
+from .model import _rpy_matrix, _vector
 from .presets import default_reference_joints
+from .reachability import _rotation_error
 
 
 class ViserWorkspace:
@@ -40,77 +45,96 @@ class ViserWorkspace:
             raise ImportError(
                 "Viser support requires workspace-analyzer[viser]"
             ) from exc
+        if server is None:
+            require_port(port)
+        workspace_root = workspace_root.rstrip("/")
+        if not workspace_root.startswith("/") or not workspace_root:
+            raise ValueError("workspace_root must be an absolute scene path")
+        scene_offset = np.asarray(scene_offset, dtype=float)
+        if scene_offset.shape != (3,) or not np.isfinite(scene_offset).all():
+            raise ValueError("scene_offset must contain three finite values")
+        require_integer(
+            reference_active_link_index, "reference_active_link_index", minimum=1
+        )
+        joints = np.asarray(
+            default_reference_joints(solver) if initial_q is None else initial_q,
+            dtype=float,
+        ).copy()
+        if joints.shape != (solver.dof,):
+            raise ValueError(f"initial_q must have shape ({solver.dof},)")
+        reference_pose = _numpy(solver.forward(joints)).copy()
         self.solver = solver
         self._owns_server = server is None
+        self._lock = threading.RLock()
+        self._closed = False
+        self._analysis_thread = None
+        self._analysis_cancel = None
+        self._playback_stop = threading.Event()
+        self._playback_thread = None
+        self._splat_update_timer = None
+        self._gui_folders: list[object] = []
+        self._handles: dict[str, object] = {}
+        self._scene_root = None
+        self._workspace_root = None
         self.server = (
             viser.ViserServer(port=port, label="WorkspaceAnalyzer")
             if server is None
             else server
         )
-        self.root = f"/{label}"
-        self.workspace_root = workspace_root.rstrip("/")
-        self.trajectory_root = self.root + "/overlays/trajectory"
-        if not self.workspace_root.startswith("/") or not self.workspace_root:
-            raise ValueError("workspace_root must be an absolute scene path")
-        self._gui_prefix = "" if gui_label is None else f"{gui_label} · "
-        scene_offset = np.asarray(scene_offset, dtype=float)
-        if scene_offset.shape != (3,) or not np.isfinite(scene_offset).all():
-            raise ValueError("scene_offset must contain three finite values")
-        self._lock = threading.RLock()
-        self._closed = False
-        self._analysis_thread = None
-        self._handles: dict[str, object] = {}
-        self._link_frames: dict[str, object] = {}
-        self._sliders = []
-        self._q = np.asarray(
-            default_reference_joints(solver) if initial_q is None else initial_q,
-            dtype=float,
-        ).copy()
-        if self._q.shape != (solver.dof,):
-            raise ValueError(f"initial_q must have shape ({solver.dof},)")
-        self._initial_q = self._q.copy()
-        self.reference_pose = _numpy(solver.forward(self._q)).copy()
-        self.reference_joints = self._q.copy()
-        self._cartesian_job = None
-        self._recompute_running = False
-        self._analysis_cancel = None
-        self._display_base_transform = np.eye(4)
-        self._load_full_robot = load_full_robot
-        if reference_active_link_index < 1:
-            raise ValueError("reference_active_link_index must be positive")
-        self._reference_active_link_index = reference_active_link_index
-        self._trajectory = None
-        self._playback_stop = threading.Event()
-        self._playback_thread = None
-        self._playback_frame_update = False
-        self._scene_root = self.server.scene.add_frame(
-            self.root, show_axes=False, position=scene_offset
-        )
-        self._robot_root = self.server.scene.add_frame(
-            self.root + "/links", show_axes=False
-        )
-        self._workspace_root = self.server.scene.add_frame(
-            self.workspace_root, show_axes=False, position=scene_offset, visible=False
-        )
-        self._handles["workspace"] = self._workspace_root
-        self._workspace_point_size = 0.006
-        self._trajectory_point_size = 0.012
-        self._trajectory_line_width = 3.0
-        self._reachable_opacity = 0.65
-        self._unreachable_opacity = 0.18
-        self._workspace_result = None
-        self._workspace_indices = None
-        self._splat_update_timer = None
-        self._add_controls()
-        self.visual_count = 0
-        if load_robot_visuals:
-            self.visual_count = self.load_urdf_visuals(full_robot=load_full_robot)
-        self._add_reference_frames()
-        # Full-robot loading may change world_from_solver_base after GUI creation.
-        self._update_reference_display()
-        self.update_robot(self._q)
-        if self._owns_server:
-            self.frame_view()
+        with ExitStack() as startup:
+            startup.callback(self.close)
+            self.root = f"/{label}"
+            self.workspace_root = workspace_root
+            self.trajectory_root = self.root + "/overlays/trajectory"
+            self._gui_prefix = "" if gui_label is None else f"{gui_label} · "
+            self._link_frames: dict[str, object] = {}
+            self._sliders = []
+            self._q = joints
+            self._initial_q = self._q.copy()
+            self.reference_pose = reference_pose
+            self.reference_joints = self._q.copy()
+            self._cartesian_job = None
+            self.last_cartesian_result = None
+            self._recompute_running = False
+            self._display_base_transform = np.eye(4)
+            self._load_full_robot = load_full_robot
+            self._reference_active_link_index = reference_active_link_index
+            self._trajectory = None
+            self._playback_frame_update = False
+            self._scene_root = self.server.scene.add_frame(
+                self.root, show_axes=False, position=scene_offset
+            )
+            self._robot_root = self.server.scene.add_frame(
+                self.root + "/links", show_axes=False
+            )
+            self._workspace_root = self.server.scene.add_frame(
+                self.workspace_root,
+                show_axes=False,
+                position=scene_offset,
+                visible=False,
+            )
+            self._handles["workspace"] = self._workspace_root
+            self._workspace_point_size = 0.006
+            self._trajectory_point_size = 0.012
+            self._trajectory_line_width = 3.0
+            self._reachable_opacity = 0.65
+            self._unreachable_opacity = 0.18
+            self._workspace_result = None
+            self._workspace_indices = None
+            self._add_controls()
+            self.visual_count = 0
+            if load_robot_visuals:
+                self.visual_count = self.load_urdf_visuals(full_robot=load_full_robot)
+            self._add_reference_frames()
+            # Full-robot loading may change world_from_solver_base after GUI creation.
+            self._update_reference_display()
+            self.update_robot(self._q)
+            from .plane_visualization import PlaneReachabilityPanel
+
+            self.plane_panel = PlaneReachabilityPanel(self)
+            if self._owns_server:
+                self.frame_view()
+            startup.pop_all()
 
     def _framing_points(self):
         poses = self.solver.forward(self._q, all_links=True)
@@ -124,42 +148,52 @@ class ViserWorkspace:
                 self._workspace_result.points[self._workspace_indices],
             )
             points = np.vstack((points, cloud))
+        preview = self._handles.get("plane_preview")
+        if preview is not None and preview.visible:
+            points = np.vstack((points, np.asarray(preview.points).reshape(-1, 3)))
         return points + np.asarray(self._scene_root.position)
 
     def frame_view(self, additional_viewers=()):
         """Frame robots and visible workspaces in the shared display coordinates."""
-        points = np.vstack(
-            [viewer._framing_points() for viewer in (self, *additional_viewers)]
-        )
-        points = points[np.isfinite(points).all(axis=1)]
-        if not len(points):
-            return
-        lower, upper = points.min(axis=0), points.max(axis=0)
-        center = (lower + upper) * 0.5
-        radius = max(float(np.linalg.norm(upper - lower)) * 0.5, 0.25)
-        direction = np.array([1.5, -2.0, 1.1])
-        position = center + direction / np.linalg.norm(direction) * radius * 2.4
-        cameras = [client.camera for client in self.server.get_clients().values()]
-        initial = getattr(self.server, "initial_camera", None)
-        if initial is not None:
-            cameras.append(initial)
-        for camera in cameras:
-            camera.up_direction = (0.0, 0.0, 1.0)
-            camera.position = tuple(position)
-            camera.look_at = tuple(center)
+        with self._lock:
+            if self._closed:
+                return
+            points = np.vstack(
+                [viewer._framing_points() for viewer in (self, *additional_viewers)]
+            )
+            points = points[np.isfinite(points).all(axis=1)]
+            if not len(points):
+                return
+            lower, upper = points.min(axis=0), points.max(axis=0)
+            center = (lower + upper) * 0.5
+            radius = max(float(np.linalg.norm(upper - lower)) * 0.5, 0.25)
+            direction = np.array([1.5, -2.0, 1.1])
+            position = center + direction / np.linalg.norm(direction) * radius * 2.4
+            cameras = [client.camera for client in self.server.get_clients().values()]
+            initial = getattr(self.server, "initial_camera", None)
+            if initial is not None:
+                cameras.append(initial)
+            for camera in cameras:
+                camera.up_direction = (0.0, 0.0, 1.0)
+                camera.position = tuple(position)
+                camera.look_at = tuple(center)
 
     def reset_pose(self):
         """Restore the startup posture, including an explicitly supplied initial_q."""
         with self._lock:
+            if self._closed:
+                return
             self._q[:] = self._initial_q
             for value, slider in zip(self._q, self._sliders):
                 slider.value = float(value)
             self.update_robot(self._q)
 
     def _add_controls(self) -> None:
-        with self.server.gui.add_folder(
+        folder = self.server.gui.add_folder(
             self._gui_prefix + "Display", expand_by_default=False
-        ):
+        )
+        self._gui_folders.append(folder)
+        with folder:
             frame = self.server.gui.add_button("Frame robot and workspace")
 
             @frame.on_click
@@ -189,7 +223,9 @@ class ViserWorkspace:
 
             @controls["robot"].on_update
             def _robot_visibility(event):
-                self._robot_root.visible = bool(event.target.value)
+                with self._lock:
+                    if not self._closed:
+                        self._robot_root.visible = bool(event.target.value)
 
             for key in (
                 "skeleton",
@@ -205,9 +241,12 @@ class ViserWorkspace:
 
                 @control.on_update
                 def _visibility(event, handle_key=key):
-                    handle = self._handles.get(handle_key)
-                    if handle is not None:
-                        handle.visible = bool(event.target.value)
+                    with self._lock:
+                        if self._closed:
+                            return
+                        handle = self._handles.get(handle_key)
+                        if handle is not None:
+                            handle.visible = bool(event.target.value)
 
             point_size = self.server.gui.add_slider(
                 "Workspace point size",
@@ -230,6 +269,9 @@ class ViserWorkspace:
                 step=0.05,
                 initial_value=self._unreachable_opacity,
             )
+            self._opacity_controls = (reachable_opacity, unreachable_opacity)
+            for control in self._opacity_controls:
+                control.disabled = True
             metric_selector = self.server.gui.add_dropdown(
                 "Workspace color metric",
                 ("manipulability",),
@@ -260,21 +302,30 @@ class ViserWorkspace:
 
             @point_size.on_update
             def _point_size(event):
-                self._workspace_point_size = float(event.target.value)
-                cloud = self._handles.get("workspace_cloud")
-                if cloud is not None:
-                    cloud.point_size = self._workspace_point_size
-                self._schedule_splat_refresh()
+                with self._lock:
+                    if self._closed:
+                        return
+                    self._workspace_point_size = float(event.target.value)
+                    cloud = self._handles.get("workspace_cloud")
+                    if cloud is not None:
+                        cloud.point_size = self._workspace_point_size
+                    self._schedule_splat_refresh()
 
             @reachable_opacity.on_update
             def _reachable_opacity(event):
-                self._reachable_opacity = float(event.target.value)
-                self._schedule_splat_refresh()
+                with self._lock:
+                    if self._closed:
+                        return
+                    self._reachable_opacity = float(event.target.value)
+                    self._schedule_splat_refresh()
 
             @unreachable_opacity.on_update
             def _unreachable_opacity(event):
-                self._unreachable_opacity = float(event.target.value)
-                self._schedule_splat_refresh()
+                with self._lock:
+                    if self._closed:
+                        return
+                    self._unreachable_opacity = float(event.target.value)
+                    self._schedule_splat_refresh()
 
             @metric_selector.on_update
             def _metric(event):
@@ -282,19 +333,27 @@ class ViserWorkspace:
 
             @trajectory_point_size.on_update
             def _trajectory_points(event):
-                self._trajectory_point_size = float(event.target.value)
-                handle = self._handles.get("trajectory_targets")
-                if handle is not None:
-                    handle.point_size = self._trajectory_point_size
+                with self._lock:
+                    if self._closed:
+                        return
+                    self._trajectory_point_size = float(event.target.value)
+                    handle = self._handles.get("trajectory_targets")
+                    if handle is not None:
+                        handle.point_size = self._trajectory_point_size
 
             @trajectory_line_width.on_update
             def _trajectory_width(event):
-                self._trajectory_line_width = float(event.target.value)
-                handle = self._handles.get("trajectory_path")
-                if handle is not None:
-                    handle.thickness = self._trajectory_line_width
+                with self._lock:
+                    if self._closed:
+                        return
+                    self._trajectory_line_width = float(event.target.value)
+                    handle = self._handles.get("trajectory_path")
+                    if handle is not None:
+                        handle.thickness = self._trajectory_line_width
 
-        with self.server.gui.add_folder(self._gui_prefix + "Joint control"):
+        folder = self.server.gui.add_folder(self._gui_prefix + "Joint control")
+        self._gui_folders.append(folder)
+        with folder:
             reset = self.server.gui.add_button("Reset to initial pose")
 
             @reset.on_click
@@ -315,12 +374,16 @@ class ViserWorkspace:
                 @slider.on_update
                 def _update(event, index=i):
                     with self._lock:
+                        if self._closed:
+                            return
                         self._q[index] = event.target.value
                         self.update_robot(self._q)
 
                 self._sliders.append(slider)
 
-        with self.server.gui.add_folder(self._gui_prefix + "Reference pose"):
+        folder = self.server.gui.add_folder(self._gui_prefix + "Reference pose")
+        self._gui_folders.append(folder)
+        with folder:
             capture = self.server.gui.add_button("Capture current FK pose")
             recompute = self.server.gui.add_button(
                 "Recompute Cartesian reachability", disabled=True
@@ -332,8 +395,7 @@ class ViserWorkspace:
 
             @capture.on_click
             def _capture(_event):
-                with self._lock:
-                    self.capture_reference_pose()
+                self.capture_reference_pose()
 
             @recompute.on_click
             def _recompute(_event):
@@ -341,13 +403,16 @@ class ViserWorkspace:
 
             @cancel.on_click
             def _cancel(_event):
-                if self._analysis_cancel is not None:
-                    self._analysis_cancel.set()
-                    self._set_reference_status("cancelling...")
+                with self._lock:
+                    if not self._closed and self._analysis_cancel is not None:
+                        self._analysis_cancel.set()
+                        self._set_reference_status("cancelling...")
 
         self._update_reference_display()
 
-        with self.server.gui.add_folder(self._gui_prefix + "Trajectory playback"):
+        folder = self.server.gui.add_folder(self._gui_prefix + "Trajectory playback")
+        self._gui_folders.append(folder)
+        with folder:
             self._play_button = self.server.gui.add_button("Play", disabled=True)
             self._stop_button = self.server.gui.add_button("Stop", disabled=True)
             self._frame_slider = self.server.gui.add_slider(
@@ -376,11 +441,22 @@ class ViserWorkspace:
                     self.show_trajectory_frame(int(event.target.value))
 
     def capture_reference_pose(self) -> np.ndarray:
-        """Capture FK at the current sliders as the Cartesian reference pose."""
-        self.reference_pose = _numpy(self.solver.forward(self._q)).copy()
-        self.reference_joints = self._q.copy()
-        self._update_reference_display()
-        return self.reference_pose.copy()
+        """Capture FK and cancel outdated work, or return the saved pose after close."""
+        with self._lock:
+            if self._closed:
+                return self.reference_pose.copy()
+            joints = self._q.copy()
+            pose = _numpy(self.solver.forward(joints)).copy()
+            changed = not (
+                np.array_equal(joints, self.reference_joints)
+                and np.array_equal(pose, self.reference_pose)
+            )
+            if changed and self._analysis_cancel is not None:
+                self._analysis_cancel.set()
+            self.reference_pose = pose
+            self.reference_joints = joints
+            self._update_reference_display()
+            return pose.copy()
 
     def _update_reference_display(self) -> None:
         pose = self.reference_pose
@@ -405,31 +481,71 @@ class ViserWorkspace:
             f"- joints: `[{joints}]`"
         )
 
+    def configure_plane_recompute(self, config, assessment=None, **kwargs) -> None:
+        """Configure editable plane sampling without starting an IK job."""
+        self.plane_panel.configure(config, assessment, **kwargs)
+
     def configure_cartesian_recompute(self, analyzer, config) -> None:
-        """Enable recomputation using the orientation captured from the sliders."""
-        self._cartesian_job = (analyzer, config)
-        self._recompute_button.disabled = False
+        """Configure the next job; (None, None) disables Cartesian recomputation.
+
+        Changing tasks cancels an in-flight job so its result cannot replace
+        the newly selected dataset when it eventually finishes.
+        """
+        if (analyzer is None) != (config is None):
+            raise ValueError("analyzer and config must both be set or both be None")
+        if config is not None and not isinstance(config, CartesianConfig):
+            raise ValueError("config must be a CartesianConfig")
+        if analyzer is not None and not callable(
+            getattr(analyzer, "analyze_cartesian", None)
+        ):
+            raise ValueError("analyzer must provide analyze_cartesian")
+        with self._lock:
+            if self._closed:
+                return
+            if self._analysis_cancel is not None:
+                self._analysis_cancel.set()
+            self._cartesian_job = None if analyzer is None else (analyzer, config)
+            self._recompute_button.disabled = (
+                self._recompute_running or analyzer is None
+            )
 
     def recompute_cartesian_async(self) -> None:
         """Recompute without blocking Viser's GUI callback thread."""
         with self._lock:
             if self._closed or self._cartesian_job is None or self._recompute_running:
                 return
+            analyzer, config = self._cartesian_job
+            try:
+                updated = replace(
+                    config,
+                    reference_pose=self.reference_pose.copy(),
+                    reference_joints=self.reference_joints.copy(),
+                )
+            except (TypeError, ValueError) as exc:
+                self._reference_info.content = f"**Recompute failed:** {exc}"
+                return
             self._recompute_running = True
             self._recompute_button.disabled = True
             self._cancel_button.disabled = False
             cancel = self._analysis_cancel = threading.Event()
-            analyzer, config = self._cartesian_job
-            updated = replace(
-                config,
-                reference_pose=self.reference_pose.copy(),
-                reference_joints=self.reference_joints.copy(),
-            )
             self._set_reference_status("computing 0.0%")
+
+            def finish():
+                with self._lock:
+                    self._recompute_running = False
+                    self._analysis_cancel = None
+                    if not self._closed:
+                        self._recompute_button.disabled = self._cartesian_job is None
+                        self._cancel_button.disabled = True
+                        panel = self.plane_panel
+                        panel.compute_button.disabled = panel._export_running
+                        panel.retry_save.disabled = panel._export_running or not bool(
+                            panel._export_errors
+                        )
 
             def progress(value):
                 with self._lock:
-                    if not self._closed:
+                    if not self._closed and not cancel.is_set():
                         self._set_reference_status(f"computing {100.0 * value:.1f}%")
 
             def work():
@@ -438,7 +554,9 @@ class ViserWorkspace:
                         updated, cancel_event=cancel, progress_callback=progress
                     )
                     with self._lock:
-                        if not self._closed and not cancel.is_set():
+                        if cancel.is_set():
+                            raise AnalysisCancelled()
+                        if not self._closed:
                             self.add_workspace(result)
                             self.last_cartesian_result = result
                             self._set_reference_status("complete")
@@ -451,22 +569,22 @@ class ViserWorkspace:
                         if not self._closed:
                             self._set_reference_status(f"failed: `{exc}`")
                 finally:
-                    with self._lock:
-                        self._recompute_running = False
-                        self._analysis_cancel = None
-                        if not self._closed:
-                            self._recompute_button.disabled = False
-                            self._cancel_button.disabled = True
+                    finish()
 
-            self._analysis_thread = threading.Thread(target=work, daemon=True)
-            self._analysis_thread.start()
+            try:
+                self._analysis_thread = threading.Thread(target=work, daemon=True)
+                self._analysis_thread.start()
+            except Exception as exc:
+                self._analysis_thread = None
+                finish()
+                self._set_reference_status(f"failed to start: `{exc}`")
 
     def _set_reference_status(self, status: str) -> None:
         self._update_reference_display()
         self._reference_info.content += f"\n- Status: **{status}**"
 
     def load_urdf_visuals(self, *, full_robot: bool = False) -> int:
-        """Load mesh, box, cylinder, and sphere visuals for the selected chain."""
+        """Load mesh and primitive visuals for the selected chain or full robot."""
         source = self.solver.model.source
         if source is None:
             return 0
@@ -476,7 +594,7 @@ class ViserWorkspace:
             raise ImportError("URDF visuals require workspace-analyzer[viser]") from exc
         root = ET.parse(source).getroot()
         if full_robot:
-            neutral = _zero_tree_transforms(self.solver.model)
+            neutral = self.solver.model.zero_transforms()
             self._display_base_transform = neutral[self.solver.base_link]
             for link_name, transform in neutral.items():
                 frame = self._ensure_link_frame(link_name)
@@ -505,7 +623,7 @@ class ViserWorkspace:
                         else _resolve_mesh(mesh_node.get("filename", ""), source.parent)
                     )
                     if mesh_path is not None and mesh_path.suffix.lower() == ".glb":
-                        scale = tuple(_numbers(mesh_node.get("scale"), (1.0, 1.0, 1.0)))
+                        scale = tuple(_vector(mesh_node.get("scale"), (1.0, 1.0, 1.0)))
                         self.server.scene.add_glb(
                             scene_name,
                             glb_data=mesh_path.read_bytes(),
@@ -538,24 +656,38 @@ class ViserWorkspace:
         return handle
 
     def update_robot(self, q) -> None:
-        transforms = self.solver.forward(q, all_links=True)
-        for link_name, transform_value in transforms.items():
-            transform = self._display_base_transform @ _numpy(transform_value)
-            frame = self._ensure_link_frame(link_name)
-            frame.wxyz = _wxyz(transform[:3, :3])
-            frame.position = transform[:3, 3]
-        points = np.asarray(
-            [
-                (
-                    self._display_base_transform
-                    @ _numpy(transforms[self.solver.base_link])
-                )[:3, 3]
-            ]
-            + [
-                (self._display_base_transform @ _numpy(transforms[j.child]))[:3, 3]
-                for j in self.solver.chain
-            ]
+        with self._lock:
+            if self._closed:
+                return
+            transforms = self.solver.forward(q, all_links=True)
+            self._update_robot_transforms(transforms)
+
+    def _update_robot_transforms(self, transforms):
+        """Render existing FK poses and return the TCP pose in the solver base."""
+        from viser.transforms import SO3
+
+        link_names = (
+            self.solver.base_link,
+            *(joint.child for joint in self.solver.chain),
         )
+        poses = [transforms[name] for name in link_names]
+        if self.solver.backend == "torch":
+            import torch
+
+            # Transfer the whole chain once, rather than synchronizing each link.
+            poses = _numpy(torch.stack(poses))
+        else:
+            poses = np.stack(poses)
+        display_poses = self._display_base_transform @ poses
+        # Float32 FK can leave roundoff; scene frames need unit quaternions.
+        quaternions = SO3.from_matrix(display_poses[:, :3, :3]).normalize().wxyz
+        for link_name, transform, quaternion in zip(
+            link_names, display_poses, quaternions
+        ):
+            frame = self._ensure_link_frame(link_name)
+            frame.wxyz = quaternion
+            frame.position = transform[:3, 3]
+        points = display_poses[:, :3, 3]
         segments = np.stack((points[:-1], points[1:]), axis=1)
         colors = np.broadcast_to(
             np.array([30, 144, 255], dtype=np.uint8), segments.shape
@@ -580,19 +712,21 @@ class ViserWorkspace:
                 colors=np.tile([255, 165, 0], (len(points), 1)),
                 point_size=0.015,
                 point_shape="circle",
+                precision="float32",
                 visible=False,
             )
             self._handles["joints"] = joints
         else:
             joints.points = points
-        tip = self._display_base_transform @ _numpy(transforms[self.solver.tip_link])
+        tip = display_poses[-1]
         tool = self._handles.get("tool")
         if tool is None:
             tool = self.server.scene.add_frame(
                 self.root + "/overlays/tool", axes_length=0.1, axes_radius=0.003
             )
             self._handles["tool"] = tool
-        tool.wxyz, tool.position = _wxyz(tip[:3, :3]), tip[:3, 3]
+        tool.wxyz, tool.position = quaternions[-1], tip[:3, 3]
+        return poses[-1]
 
     def _add_reference_frames(self) -> None:
         """Show parallel comparison axes at world origin and structural link base."""
@@ -633,108 +767,166 @@ class ViserWorkspace:
         visible: bool | None = None,
     ) -> None:
         """Add a robustly metric-colored cloud with deterministic downsampling."""
-        if max_points < 1:
-            raise ValueError("max_points must be positive")
-        indices = _display_indices(len(result.points), max_points)
-        points = np.asarray(result.points[indices], dtype=np.float32)
-        points = _transform_points(self._display_base_transform, points).astype(
-            np.float32
-        )
-        first_workspace = self._workspace_result is None
-        self._workspace_result = result
-        self._workspace_indices = indices
-        if visible is not None or first_workspace:
-            # Show the first workspace by default. Recompute preserves toggles.
-            show = True if visible is None else bool(visible)
-            self._workspace_root.visible = show
-            self._visibility_controls["workspace"].value = show
-        if self._owns_server and first_workspace:
-            self.frame_view()
-        self._workspace_point_size = point_size
-        old_cloud = self._handles.pop("workspace_cloud", None)
-        if old_cloud is not None:
-            old_cloud.remove()
-        for key in ("reachable", "unreachable"):
-            old_splats = self._handles.pop(f"{key}_splats", None)
-            if old_splats is not None:
-                old_splats.remove()
-        if result.reachable is not None:
-            self._metric_selector.disabled = True
-            reachable = np.asarray(result.reachable[indices], dtype=bool)
-            self._add_reachability_splats(points, reachable)
-            rate = 100.0 * float(np.mean(result.reachable))
-            panel = self._handles.get("workspace_info")
-            content = (
-                "### Cartesian reachability\n"
-                f"- Targets: **{len(result.points):,}**\n"
-                f"- Reachable: **{np.count_nonzero(result.reachable):,}** "
-                f"(**{rate:.1f}%**)\n"
-                "- Green: reachable · Red: unreachable"
-            )
-            assessment = result.metadata.get("assessment")
-            if assessment is not None:
-                content += (
-                    f"\n- Quality accepted: **{assessment['quality_pass_count']:,}** "
-                    f"(**{assessment['quality_pass_rate']:.1%}** of all targets)"
-                    f"\n- IK succeeded, below quality gates: "
-                    f"**{assessment['quality_rejected_count']:,}**"
-                    f"\n- Dexterity task: **{result.metadata['dexterity_task']}**"
-                    "\n- Quality gates evaluate the selected IK solution."
+        with self._lock:
+            if self._closed:
+                return
+            require_integer(max_points, "max_points", minimum=1)
+            if not np.isfinite(point_size) or point_size <= 0:
+                raise ValueError("point_size must be finite and positive")
+            available_metrics = {
+                "manipulability": result.manipulability,
+                **(result.metrics or {}),
+            }
+            if result.reachable is None and color_metric not in available_metrics:
+                raise ValueError(
+                    f"unknown color metric {color_metric!r}; "
+                    f"choose from {sorted(available_metrics)}"
                 )
-            failure_stats = result.metadata.get("residual_summary", {}).get(
-                "unreachable"
+            if (
+                self._analysis_cancel is not None
+                and threading.current_thread() is not self._analysis_thread
+            ):
+                self._analysis_cancel.set()
+            indices = _display_indices(len(result.points), max_points)
+            is_plane = result.reachable is not None and "plane_scan" in result.metadata
+            if is_plane:
+                quality = (result.metrics or {}).get("quality_pass", result.reachable)
+                if max_points >= 3:
+                    from .plane_plot import _preview_indices
+
+                    indices = _preview_indices(result.reachable, quality, max_points)
+            points = np.asarray(result.points[indices], dtype=np.float32)
+            points = _transform_points(self._display_base_transform, points).astype(
+                np.float32
             )
-            if failure_stats is not None:
-                content += (
-                    "\n- Unreachable residual: "
-                    f"median `{failure_stats['median']:.3g}`, "
-                    f"p95 `{failure_stats['p95']:.3g}`"
+            first_workspace = self._workspace_result is None
+            self._workspace_result = result
+            self._workspace_indices = indices
+            if visible is not None or first_workspace:
+                # Show the first workspace by default. Recompute preserves toggles.
+                show = True if visible is None else bool(visible)
+                self._workspace_root.visible = show
+                self._visibility_controls["workspace"].value = show
+            if self._owns_server and first_workspace:
+                self.frame_view()
+            self._workspace_point_size = point_size
+            old_cloud = self._handles.pop("workspace_cloud", None)
+            if old_cloud is not None:
+                old_cloud.remove()
+            for key in ("reachable", "unreachable"):
+                old_splats = self._handles.pop(f"{key}_splats", None)
+                if old_splats is not None:
+                    old_splats.remove()
+            for control in self._opacity_controls:
+                control.disabled = result.reachable is None or is_plane
+            self._metric_info.content = ""
+            if result.reachable is not None:
+                self._metric_selector.disabled = True
+                reachable = np.asarray(result.reachable[indices], dtype=bool)
+                legend = "- Green: reachable · Red: unreachable"
+                if is_plane:
+                    # Discrete planar samples need no translucent volume rendering.
+                    # Point clouds also avoid splat sorting artifacts on software WebGL.
+                    quality = np.asarray(quality[indices], dtype=bool)
+                    colors = np.tile([206, 70, 83], (len(points), 1))
+                    colors[reachable] = [217, 155, 24]
+                    colors[reachable & quality] = [22, 132, 106]
+                    self._handles["workspace_cloud"] = (
+                        self.server.scene.add_point_cloud(
+                            self.workspace_root + "/points",
+                            points=points,
+                            colors=colors.astype(np.uint8),
+                            point_size=point_size,
+                            point_shape="circle",
+                            precision="float32",
+                        )
+                    )
+                    legend = (
+                        "- Green: quality accepted · Amber: below quality gates · "
+                        "Red: IK not solved"
+                    )
+                else:
+                    self._add_reachability_splats(points, reachable)
+                rate = 100.0 * float(np.mean(result.reachable))
+                panel = self._handles.get("workspace_info")
+                content = (
+                    "### Cartesian reachability\n"
+                    f"- Targets: **{len(result.points):,}**\n"
+                    f"- Reachable: **{np.count_nonzero(result.reachable):,}** "
+                    f"(**{rate:.1f}%**)\n"
+                    f"{legend}"
                 )
-            if panel is None:
-                self._handles["workspace_info"] = self.server.gui.add_markdown(content)
+                if len(indices) < len(result.points):
+                    content += f"\n- Displaying **{len(indices):,}** sampled targets"
+                assessment = result.metadata.get("assessment")
+                if assessment is not None:
+                    content += (
+                        "\n- Quality accepted: "
+                        f"**{assessment['quality_pass_count']:,}** "
+                        f"(**{assessment['quality_pass_rate']:.1%}** of all targets)"
+                        f"\n- IK succeeded, below quality gates: "
+                        f"**{assessment['quality_rejected_count']:,}**"
+                        f"\n- Dexterity task: **{result.metadata['dexterity_task']}**"
+                        "\n- Quality gates evaluate the selected IK solution."
+                    )
+                failure_stats = result.metadata.get("residual_summary", {}).get(
+                    "unreachable"
+                )
+                if failure_stats is not None:
+                    content += (
+                        "\n- Unreachable residual: "
+                        f"median `{failure_stats['median']:.3g}`, "
+                        f"p95 `{failure_stats['p95']:.3g}`"
+                    )
+                if panel is None:
+                    self._handles["workspace_info"] = self.server.gui.add_markdown(
+                        content
+                    )
+                else:
+                    panel.content = content
+                return
+            previous_summary = self._handles.pop("workspace_info", None)
+            if previous_summary is not None:
+                previous_summary.remove()
+            metric = available_metrics[color_metric]
+            selectable_metrics = tuple(
+                name for name, values in available_metrics.items() if values is not None
+            )
+            self._metric_selector.options = selectable_metrics or ("manipulability",)
+            self._metric_selector.value = color_metric
+            self._metric_selector.disabled = len(selectable_metrics) < 2
+            if metric is None:
+                colors = np.tile([50, 180, 255], (len(points), 1))
             else:
-                panel.content = content
-            return
-        available_metrics = {
-            "manipulability": result.manipulability,
-            **(result.metrics or {}),
-        }
-        if color_metric not in available_metrics:
-            raise ValueError(
-                f"unknown color metric {color_metric!r}; "
-                f"choose from {sorted(available_metrics)}"
+                colors = _metric_colors(np.asarray(metric[indices]))
+            self._handles["workspace_cloud"] = self.server.scene.add_point_cloud(
+                self.workspace_root + "/points",
+                points=points,
+                colors=colors.astype(np.uint8),
+                point_size=point_size,
+                point_shape="circle",
+                precision="float32",
             )
-        metric = available_metrics[color_metric]
-        selectable_metrics = tuple(
-            name for name, values in available_metrics.items() if values is not None
-        )
-        self._metric_selector.options = selectable_metrics or ("manipulability",)
-        self._metric_selector.value = color_metric
-        self._metric_selector.disabled = len(selectable_metrics) < 2
-        if metric is None:
-            colors = np.tile([50, 180, 255], (len(points), 1))
-        else:
-            colors = _metric_colors(np.asarray(metric[indices]))
-        self._handles["workspace_cloud"] = self.server.scene.add_point_cloud(
-            self.workspace_root + "/points",
-            points=points,
-            colors=colors.astype(np.uint8),
-            point_size=point_size,
-            point_shape="circle",
-            precision="float32",
-        )
-        self._update_metric_info(color_metric, metric)
+            self._update_metric_info(color_metric, metric)
 
     def _set_workspace_color_metric(self, name: str) -> None:
-        result, indices = self._workspace_result, self._workspace_indices
-        cloud = self._handles.get("workspace_cloud")
-        if result is None or indices is None or cloud is None:
-            return
-        metrics = {"manipulability": result.manipulability, **(result.metrics or {})}
-        values = metrics.get(name)
-        if values is not None:
-            cloud.colors = _metric_colors(np.asarray(values[indices])).astype(np.uint8)
-            self._update_metric_info(name, values)
+        with self._lock:
+            if self._closed:
+                return
+            result, indices = self._workspace_result, self._workspace_indices
+            cloud = self._handles.get("workspace_cloud")
+            if result is None or indices is None or cloud is None:
+                return
+            metrics = {
+                "manipulability": result.manipulability,
+                **(result.metrics or {}),
+            }
+            values = metrics.get(name)
+            if values is not None:
+                cloud.colors = _metric_colors(np.asarray(values[indices])).astype(
+                    np.uint8
+                )
+                self._update_metric_info(name, values)
 
     def _update_metric_info(self, name: str, values) -> None:
         if values is None:
@@ -753,141 +945,161 @@ class ViserWorkspace:
 
     def add_trajectory(self, trajectory) -> None:
         """Render ordered IK targets and valid segments colored by dexterity."""
-        self._trajectory = trajectory
-        self._frame_slider.max = max(len(trajectory.positions) - 1, 1)
-        self._frame_slider.value = 0
-        self._frame_slider.disabled = False
-        self._play_button.disabled = False
-        self._stop_button.disabled = False
-        summary = trajectory.summary()
-        self._trajectory_info.content = (
-            "### Trajectory metrics\n"
-            f"- Frames: **{summary['samples']:,}**\n"
-            f"- IK success: **{summary['success_rate']:.1%}**\n"
-            f"- Max joint jump: **{summary['max_joint_jump']:.5f} rad**\n"
-            "- Max normalized jump: "
-            f"**{summary['max_normalized_joint_jump']:.5f}**\n"
-            f"- Joint path length: **{summary['joint_path_length']:.4f} rad**\n"
-            "- Normalized closure error: "
-            f"**{_format_metric(summary['normalized_closure_joint_error'])}**\n"
-            "- Peak / RMS velocity: "
-            f"**{_format_metric(summary['max_joint_velocity'])} / "
-            f"{_format_metric(summary['rms_joint_velocity'])} rad/s**\n"
-            "- Minimum singular value: "
-            f"**{_format_metric(summary['minimum_singular_value'])}**\n"
-            "- Minimum joint-limit margin: "
-            f"**{_format_metric(summary['minimum_joint_limit_margin'])}**\n"
-            f"- Velocity violations: **{summary['velocity_violations']}**"
-        )
-        targets = np.asarray(trajectory.target_poses, dtype=float)
-        success = np.asarray(trajectory.success, dtype=bool)
-        points = _transform_points(
-            self._display_base_transform, targets[:, :3, 3]
-        ).astype(np.float32)
-        point_colors = np.where(
-            success[:, None],
-            np.array([46, 204, 113], dtype=np.uint8),
-            np.array([231, 76, 60], dtype=np.uint8),
-        )
-        old_points = self._handles.pop("trajectory_targets", None)
-        if old_points is not None:
-            old_points.remove()
-        self._handles["trajectory_targets"] = self.server.scene.add_point_cloud(
-            self.trajectory_root + "/targets",
-            points=points,
-            colors=point_colors,
-            point_size=self._trajectory_point_size,
-            point_shape="circle",
-            precision="float32",
-        )
-
-        old_frames = self._handles.pop("trajectory_frames", None)
-        if old_frames is not None:
-            old_frames.remove()
-        self._handles.pop("current_target", None)
-        frame_root = self.server.scene.add_frame(
-            self.trajectory_root + "/frames", show_axes=False
-        )
-        self._handles["trajectory_frames"] = frame_root
-        stride = max(1, int(np.ceil(len(targets) / 24)))
-        for index in range(0, len(targets), stride):
-            display_pose = self._display_base_transform @ targets[index]
-            self.server.scene.add_frame(
-                self.trajectory_root + f"/frames/{index:04d}",
-                axes_length=0.035,
-                axes_radius=0.002,
-                wxyz=_wxyz(display_pose[:3, :3]),
-                position=display_pose[:3, 3],
+        with self._lock:
+            if self._closed:
+                return
+            self.stop_trajectory()
+            self._trajectory = trajectory
+            self._frame_slider.max = max(len(trajectory.positions) - 1, 1)
+            self._frame_slider.value = 0
+            self._frame_slider.disabled = False
+            self._play_button.disabled = False
+            self._stop_button.disabled = False
+            summary = trajectory.summary()
+            prismatic = [
+                joint.kind == "prismatic" for joint in self.solver.active_joints
+            ]
+            joint_unit = (
+                "m" if all(prismatic) else "joint units" if any(prismatic) else "rad"
             )
-        current_pose = self._display_base_transform @ targets[0]
-        current_target = self.server.scene.add_frame(
-            self.trajectory_root + "/frames/current_target",
-            axes_length=0.075,
-            axes_radius=0.004,
-            wxyz=_wxyz(current_pose[:3, :3]),
-            position=current_pose[:3, 3],
-        )
-        self._handles["current_target"] = current_target
-        old_error = self._handles.pop("pose_error", None)
-        if old_error is not None:
-            old_error.remove()
-        self._handles["pose_error"] = self.server.scene.add_line_segments(
-            self.trajectory_root + "/pose_error",
-            points=np.stack((points[0], points[0]))[None, :, :],
-            colors=np.array([[[255, 64, 64], [255, 220, 64]]], dtype=np.uint8),
-            thickness=3.0,
-            thickness_units="screen",
-        )
+            self._trajectory_info.content = (
+                "### Trajectory metrics\n"
+                f"- Frames: **{summary['samples']:,}**\n"
+                f"- IK success: **{summary['success_rate']:.1%}**\n"
+                f"- Max joint jump: **{summary['max_joint_jump']:.5f} {joint_unit}**\n"
+                "- Max normalized jump: "
+                f"**{summary['max_normalized_joint_jump']:.5f}**\n"
+                "- Joint-coordinate path norm: "
+                f"**{summary['joint_path_length']:.4f} {joint_unit}**\n"
+                "- Normalized closure error: "
+                f"**{_format_metric(summary['normalized_closure_joint_error'])}**\n"
+                "- Peak / RMS velocity: "
+                f"**{_format_metric(summary['max_joint_velocity'])} / "
+                f"{_format_metric(summary['rms_joint_velocity'])} {joint_unit}/s**\n"
+                "- Minimum singular value: "
+                f"**{_format_metric(summary['minimum_singular_value'])}**\n"
+                "- Minimum joint-limit margin: "
+                f"**{_format_metric(summary['minimum_joint_limit_margin'])}**\n"
+                f"- Velocity violations: **{summary['velocity_violations']}**"
+            )
+            targets = np.asarray(trajectory.target_poses, dtype=float)
+            success = np.asarray(trajectory.success, dtype=bool)
+            points = _transform_points(
+                self._display_base_transform, targets[:, :3, 3]
+            ).astype(np.float32)
+            point_colors = np.where(
+                success[:, None],
+                np.array([46, 204, 113], dtype=np.uint8),
+                np.array([231, 76, 60], dtype=np.uint8),
+            )
+            old_points = self._handles.pop("trajectory_targets", None)
+            if old_points is not None:
+                old_points.remove()
+            self._handles["trajectory_targets"] = self.server.scene.add_point_cloud(
+                self.trajectory_root + "/targets",
+                points=points,
+                colors=point_colors,
+                point_size=self._trajectory_point_size,
+                point_shape="circle",
+                precision="float32",
+                visible=self._visibility_controls["trajectory_targets"].value,
+            )
 
-        old_path = self._handles.pop("trajectory_path", None)
-        if old_path is not None:
-            old_path.remove()
-        valid = success[:-1] & success[1:]
-        if not np.any(valid):
+            old_frames = self._handles.pop("trajectory_frames", None)
+            if old_frames is not None:
+                old_frames.remove()
+            self._handles.pop("current_target", None)
+            frame_root = self.server.scene.add_frame(
+                self.trajectory_root + "/frames",
+                show_axes=False,
+                visible=self._visibility_controls["trajectory_frames"].value,
+            )
+            self._handles["trajectory_frames"] = frame_root
+            stride = max(1, int(np.ceil(len(targets) / 24)))
+            for index in range(0, len(targets), stride):
+                display_pose = self._display_base_transform @ targets[index]
+                self.server.scene.add_frame(
+                    self.trajectory_root + f"/frames/{index:04d}",
+                    axes_length=0.035,
+                    axes_radius=0.002,
+                    wxyz=_wxyz(display_pose[:3, :3]),
+                    position=display_pose[:3, 3],
+                )
+            current_pose = self._display_base_transform @ targets[0]
+            current_target = self.server.scene.add_frame(
+                self.trajectory_root + "/frames/current_target",
+                axes_length=0.075,
+                axes_radius=0.004,
+                wxyz=_wxyz(current_pose[:3, :3]),
+                position=current_pose[:3, 3],
+            )
+            self._handles["current_target"] = current_target
+            old_error = self._handles.pop("pose_error", None)
+            if old_error is not None:
+                old_error.remove()
+            self._handles["pose_error"] = self.server.scene.add_line_segments(
+                self.trajectory_root + "/pose_error",
+                points=np.stack((points[0], points[0]))[None, :, :],
+                colors=np.array([[[255, 64, 64], [255, 220, 64]]], dtype=np.uint8),
+                thickness=3.0,
+                thickness_units="screen",
+            )
+
+            old_path = self._handles.pop("trajectory_path", None)
+            if old_path is not None:
+                old_path.remove()
+            valid = success[:-1] & success[1:]
+            if not np.any(valid):
+                self.show_trajectory_frame(0)
+                return
+            segments = np.stack((points[:-1][valid], points[1:][valid]), axis=1)
+            metric_colors = _metric_colors(trajectory.minimum_singular_value).astype(
+                np.uint8
+            )
+            colors = np.stack(
+                (metric_colors[:-1][valid], metric_colors[1:][valid]), axis=1
+            )
+            self._handles["trajectory_path"] = self.server.scene.add_line_segments(
+                self.trajectory_root + "/path",
+                points=segments,
+                colors=colors,
+                thickness=self._trajectory_line_width,
+                thickness_units="screen",
+                visible=self._visibility_controls["trajectory_path"].value,
+            )
             self.show_trajectory_frame(0)
-            return
-        segments = np.stack((points[:-1][valid], points[1:][valid]), axis=1)
-        metric_colors = _metric_colors(trajectory.minimum_singular_value).astype(
-            np.uint8
-        )
-        colors = np.stack((metric_colors[:-1][valid], metric_colors[1:][valid]), axis=1)
-        self._handles["trajectory_path"] = self.server.scene.add_line_segments(
-            self.trajectory_root + "/path",
-            points=segments,
-            colors=colors,
-            thickness=self._trajectory_line_width,
-            thickness_units="screen",
-        )
-        self.show_trajectory_frame(0)
 
     def show_trajectory_frame(self, index: int, *, update_sliders: bool = True) -> None:
-        """Display one successful trajectory configuration on the robot."""
-        if self._trajectory is None:
-            return
-        index = int(np.clip(index, 0, len(self._trajectory.positions) - 1))
-        target = np.asarray(self._trajectory.target_poses[index], dtype=float)
-        display_target = self._display_base_transform @ target
-        target_handle = self._handles.get("current_target")
-        if target_handle is not None:
-            target_handle.wxyz = _wxyz(display_target[:3, :3])
-            target_handle.position = display_target[:3, 3]
-        if not self._trajectory.success[index]:
-            self._trajectory_frame_info.content = (
-                f"### Current frame {index}\n- IK: **failed**\n"
-                f"- solver residual: `{self._trajectory.residual[index]:.6g}`"
-            )
-            return
+        """Show target and diagnostics; update robot joints only on success."""
         with self._lock:
+            if self._closed or self._trajectory is None:
+                return
+            index = int(np.clip(index, 0, len(self._trajectory.positions) - 1))
+            target = np.asarray(self._trajectory.target_poses[index], dtype=float)
+            display_target = self._display_base_transform @ target
+            target_handle = self._handles.get("current_target")
+            if target_handle is not None:
+                target_handle.wxyz = _wxyz(display_target[:3, :3])
+                target_handle.position = display_target[:3, 3]
+            error_line = self._handles.get("pose_error")
+            if not self._trajectory.success[index]:
+                if error_line is not None:
+                    error_line.visible = False
+                self._trajectory_frame_info.content = (
+                    f"### Current frame {index}\n- IK: **failed**\n"
+                    f"- solver residual: `{self._trajectory.residual[index]:.6g}`"
+                )
+                return
             self._q[:] = self._trajectory.positions[index]
             if update_sliders:
                 for value, slider in zip(self._q, self._sliders):
                     slider.value = float(value)
-            self.update_robot(self._q)
-            actual = _numpy(self.solver.forward(self._q))
+            transforms = self.solver.forward(self._q, all_links=True)
+            actual = self._update_robot_transforms(transforms)
             position_error = float(np.linalg.norm(actual[:3, 3] - target[:3, 3]))
-            relative_rotation = target[:3, :3].T @ actual[:3, :3]
-            cosine = np.clip((np.trace(relative_rotation) - 1.0) * 0.5, -1.0, 1.0)
-            rotation_error = float(np.arccos(cosine))
+            rotation_error = float(
+                _rotation_error(target[None, :3, :3], actual[None, :3, :3])[0]
+            )
             self._trajectory_frame_info.content = (
                 f"### Current frame {index}\n"
                 f"- IK: **success**\n"
@@ -895,13 +1107,13 @@ class ViserWorkspace:
                 f"- orientation error: **{np.degrees(rotation_error):.4f} deg**\n"
                 f"- solver residual: `{self._trajectory.residual[index]:.6g}`"
             )
-            error_line = self._handles.get("pose_error")
             if error_line is not None:
                 display_actual = self._display_base_transform @ actual
                 error_line.points = np.array(
                     [[display_actual[:3, 3], display_target[:3, 3]]],
                     dtype=np.float32,
                 )
+                error_line.visible = True
 
     def play_trajectory(self) -> None:
         """Animate the loaded trajectory in a background thread."""
@@ -918,7 +1130,7 @@ class ViserWorkspace:
                 try:
                     while not self._playback_stop.is_set():
                         with self._lock:
-                            if self._closed:
+                            if self._closed or self._playback_stop.is_set():
                                 break
                             self.show_trajectory_frame(index, update_sliders=False)
                             self._playback_frame_update = True
@@ -940,8 +1152,15 @@ class ViserWorkspace:
                         if not self._closed:
                             self._play_button.disabled = False
 
-            self._playback_thread = threading.Thread(target=work, daemon=True)
-            self._playback_thread.start()
+            try:
+                self._playback_thread = threading.Thread(target=work, daemon=True)
+                self._playback_thread.start()
+            except Exception as exc:
+                self._playback_thread = None
+                self._play_button.disabled = False
+                self._trajectory_frame_info.content = (
+                    f"**Playback failed to start:** {exc}"
+                )
 
     def stop_trajectory(self) -> None:
         """Stop trajectory playback without changing the current frame."""
@@ -949,12 +1168,15 @@ class ViserWorkspace:
 
     def add_dashboard(self, markdown: str) -> None:
         """Add or update a viewer-specific analysis summary panel."""
-        handle = self._handles.get("dashboard")
-        if handle is None:
-            handle = self.server.gui.add_markdown(markdown)
-            self._handles["dashboard"] = handle
-        else:
-            handle.content = markdown
+        with self._lock:
+            if self._closed:
+                return
+            handle = self._handles.get("dashboard")
+            if handle is None:
+                handle = self.server.gui.add_markdown(markdown)
+                self._handles["dashboard"] = handle
+            else:
+                handle.content = markdown
 
     def _add_reachability_splats(self, points, reachable) -> None:
         for key, mask, color, opacity in (
@@ -975,23 +1197,6 @@ class ViserWorkspace:
                 colors,
                 opacities,
             )
-
-    def _update_splat_covariances(self) -> None:
-        for key in ("reachable", "unreachable"):
-            handle = self._handles.get(f"{key}_splats")
-            if handle is not None:
-                handle.covariances = _isotropic_covariances(
-                    len(handle.centers), self._workspace_point_size
-                )
-
-    def _update_splat_opacity(self, key: str) -> None:
-        handle = self._handles.get(f"{key}_splats")
-        if handle is None:
-            return
-        opacity = (
-            self._reachable_opacity if key == "reachable" else self._unreachable_opacity
-        )
-        handle.opacities = np.full((len(handle.centers), 1), opacity, dtype=np.float32)
 
     def _schedule_splat_refresh(self) -> None:
         with self._lock:
@@ -1032,7 +1237,7 @@ class ViserWorkspace:
             self.close()
 
     def close(self) -> None:
-        """Cancel background work before stopping an owned Viser server."""
+        """Cancel work and remove this viewer's resources, stopping an owned server."""
         with self._lock:
             if self._closed:
                 return
@@ -1047,8 +1252,23 @@ class ViserWorkspace:
         for worker in (self._playback_thread, self._analysis_thread):
             if worker is not None and worker is not threading.current_thread():
                 worker.join(timeout=1.0)
-        if self._owns_server:
-            self.server.stop()
+        try:
+            with self._lock:
+                handles = (
+                    self._handles.get("workspace_info"),
+                    self._handles.get("dashboard"),
+                    *reversed(self._gui_folders),
+                    self._workspace_root,
+                    self._scene_root,
+                )
+                for handle in handles:
+                    # Viser's private flag also marks handles replaced at the same path.
+                    if handle is not None and not handle._impl.removed:
+                        handle.remove()
+                self._gui_folders.clear()
+        finally:
+            if self._owns_server:
+                self.server.stop()
 
     def __enter__(self):
         return self
@@ -1069,10 +1289,10 @@ def _visual_mesh(visual, urdf_directory: Path, trimesh):
             process=False,
         )
         mesh = _flatten_scene(loaded, trimesh)
-        mesh.apply_scale(_numbers(mesh_node.get("scale"), (1.0, 1.0, 1.0)))
+        mesh.apply_scale(_vector(mesh_node.get("scale"), (1.0, 1.0, 1.0)))
     elif geometry.find("box") is not None:
         mesh = trimesh.creation.box(
-            extents=_numbers(geometry.find("box").get("size"), (1, 1, 1))
+            extents=_vector(geometry.find("box").get("size"), (1, 1, 1))
         )
     elif geometry.find("cylinder") is not None:
         node = geometry.find("cylinder")
@@ -1088,7 +1308,7 @@ def _visual_mesh(visual, urdf_directory: Path, trimesh):
     color_node = visual.find("material/color")
     if color_node is not None:
         rgba = np.clip(
-            _numbers(color_node.get("rgba"), (0.7, 0.7, 0.7, 1)) * 255, 0, 255
+            _vector(color_node.get("rgba"), (0.7, 0.7, 0.7, 1)) * 255, 0, 255
         )
         mesh.visual.face_colors = rgba.astype(np.uint8)
     return mesh
@@ -1128,30 +1348,11 @@ def _resolve_mesh(filename: str, directory: Path) -> Path:
 
 
 def _origin_matrix(node) -> np.ndarray:
-    transform = np.eye(4)
     if node is None:
-        return transform
-    xyz = _numbers(node.get("xyz"), (0.0, 0.0, 0.0))
-    roll, pitch, yaw = _numbers(node.get("rpy"), (0.0, 0.0, 0.0))
-    cr, sr, cp, sp, cy, sy = (
-        np.cos(roll),
-        np.sin(roll),
-        np.cos(pitch),
-        np.sin(pitch),
-        np.cos(yaw),
-        np.sin(yaw),
-    )
-    transform[:3, :3] = (
-        (cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr),
-        (sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr),
-        (-sp, cp * sr, cp * cr),
-    )
-    transform[:3, 3] = xyz
+        return np.eye(4)
+    transform = _rpy_matrix(_vector(node.get("rpy"), (0.0, 0.0, 0.0)))
+    transform[:3, 3] = _vector(node.get("xyz"), (0.0, 0.0, 0.0))
     return transform
-
-
-def _numbers(text, default):
-    return np.asarray(default if text is None else [float(x) for x in text.split()])
 
 
 def _turbo_like(scale):
@@ -1177,45 +1378,6 @@ def _isotropic_covariances(count: int, point_size: float) -> np.ndarray:
     return np.broadcast_to(covariance, (count, 3, 3)).copy()
 
 
-def _zero_tree_transforms(model) -> dict[str, np.ndarray]:
-    """Compute a full URDF tree pose with every movable joint set to zero."""
-    children = {}
-    for joint in model.joints:
-        children.setdefault(joint.parent, []).append(joint)
-    transforms = {root: np.eye(4) for root in model.root_links}
-    queue = list(model.root_links)
-    while queue:
-        parent = queue.pop(0)
-        for joint in children.get(parent, ()):
-            value = 0.0
-            transforms[joint.child] = (
-                transforms[parent] @ joint.origin @ _joint_motion(joint, value)
-            )
-            queue.append(joint.child)
-    if len(transforms) != len(model.links):
-        raise ValueError("cannot construct a complete neutral URDF tree pose")
-    return transforms
-
-
-def _joint_motion(joint, value: float) -> np.ndarray:
-    transform = np.eye(4)
-    if joint.kind == "prismatic":
-        transform[:3, 3] = joint.axis * value
-    elif joint.kind in {"revolute", "continuous"}:
-        axis = joint.axis
-        skew = np.array(
-            (
-                (0.0, -axis[2], axis[1]),
-                (axis[2], 0.0, -axis[0]),
-                (-axis[1], axis[0], 0.0),
-            )
-        )
-        transform[:3, :3] = (
-            np.eye(3) + np.sin(value) * skew + (1.0 - np.cos(value)) * (skew @ skew)
-        )
-    return transform
-
-
 def _format_metric(value) -> str:
     return "n/a" if value is None else f"{value:.5g}"
 
@@ -1228,12 +1390,6 @@ def _display_indices(count: int, max_points: int) -> np.ndarray:
 
 def _transform_points(transform: np.ndarray, points: np.ndarray) -> np.ndarray:
     return points @ transform[:3, :3].T + transform[:3, 3]
-
-
-def _numpy(value):
-    return (
-        value.detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value)
-    )
 
 
 def _wxyz(rotation):

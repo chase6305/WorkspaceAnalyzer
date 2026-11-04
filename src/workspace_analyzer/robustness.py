@@ -8,8 +8,8 @@ from numbers import Real
 
 import numpy as np
 
+from ._arrays import as_numpy as _numpy
 from ._cancellation import check_cancelled
-from .analyzer import _numpy
 from .kinematics import _validate_homogeneous_rows, _validate_rotation_matrices
 from .reachability import _assessment_arrays, _real_array, _validated_quality_flags
 

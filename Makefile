@@ -4,7 +4,7 @@ PYTHON ?= python
 BUILD_FLAGS ?=
 
 install:
-	python -m pip install -e '.[all,dev]'
+	$(PYTHON) -m pip install -e '.[all,dev]'
 
 test:
 	PYTHONPATH=src $(PYTHON) -m pytest -q -ra --junitxml=outputs/test-results.xml
@@ -30,4 +30,4 @@ build:
 	$(PYTHON) -m build $(BUILD_FLAGS)
 
 clean:
-	python -c "import shutil; [shutil.rmtree(path, ignore_errors=True) for path in ('build', 'dist', '.pytest_cache', '.ruff_cache')]"
+	$(PYTHON) -c "import shutil; [shutil.rmtree(path, ignore_errors=True) for path in ('build', 'dist', '.pytest_cache', '.ruff_cache')]"

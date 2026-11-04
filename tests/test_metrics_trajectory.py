@@ -149,6 +149,26 @@ def test_trajectory_accepts_nonuniform_timestamps():
         solver.solve_trajectory(targets, position_only=True, timestamps=[0.0, 0.1, 0.1])
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_trajectory_accepts_tensor_seed_and_keeps_target_snapshot(device):
+    torch = pytest.importorskip("torch")
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA device is unavailable")
+    solver = KinematicsSolver(
+        RobotModel.from_urdf(URDF),
+        config=SolverConfig(backend="torch", device=device),
+    )
+    seed = torch.tensor(
+        [0.2, 0.7], dtype=torch.float64, device=device, requires_grad=True
+    )
+    targets = solver.forward(seed).detach()[None]
+    expected = _numpy(targets).copy()
+    result = solver.solve_trajectory(targets, seed=seed)
+    assert result.success.all()
+    targets[:] = 0
+    np.testing.assert_array_equal(result.target_poses, expected)
+
+
 def test_periodic_trajectory_closes_joint_path_after_cartesian_reprojection():
     solver = KinematicsSolver(
         RobotModel.from_urdf(URDF),

@@ -17,25 +17,26 @@ def _vector(text: str | None, default: tuple[float, ...]) -> np.ndarray:
 
 
 def _rpy_matrix(rpy: np.ndarray) -> np.ndarray:
-    r, p, y = rpy
+    """Return a homogeneous transform with URDF roll-pitch-yaw rotation."""
+    roll, pitch, yaw = rpy
     cr, sr, cp, sp, cy, sy = (
-        np.cos(r),
-        np.sin(r),
-        np.cos(p),
-        np.sin(p),
-        np.cos(y),
-        np.sin(y),
+        np.cos(roll),
+        np.sin(roll),
+        np.cos(pitch),
+        np.sin(pitch),
+        np.cos(yaw),
+        np.sin(yaw),
     )
-    rot = np.array(
+    rotation = np.array(
         [
             [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
             [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
             [-sp, cp * sr, cp * cr],
         ]
     )
-    out = np.eye(4)
-    out[:3, :3] = rot
-    return out
+    transform = np.eye(4)
+    transform[:3, :3] = rotation
+    return transform
 
 
 @dataclass(frozen=True)
@@ -107,8 +108,24 @@ class RobotModel:
 
     @property
     def root_links(self) -> tuple[str, ...]:
-        children = set(self._by_child)
-        return tuple(link for link in self.links if link not in children)
+        return tuple(link for link in self.links if link not in self._by_child)
+
+    def zero_transforms(self) -> dict[str, np.ndarray]:
+        """Return root-relative link poses with every movable joint set to zero.
+
+        Each root starts at identity. This describes the URDF geometry, even
+        when zero is outside a joint's motion limits. Returned arrays are fresh.
+        """
+        children = {}
+        for joint in self.joints:
+            children.setdefault(joint.parent, []).append(joint)
+        transforms = {root: np.eye(4) for root in self.root_links}
+        queue = list(transforms)
+        for parent in queue:
+            for joint in children.get(parent, ()):
+                transforms[joint.child] = transforms[parent] @ joint.origin
+                queue.append(joint.child)
+        return transforms
 
     @property
     def leaf_links(self) -> tuple[str, ...]:
@@ -136,28 +153,40 @@ class RobotModel:
         return tuple(result)
 
     def _default_root(self) -> str:
-        if len(self.root_links) != 1:
+        roots = self.root_links
+        if len(roots) != 1:
             raise ValueError("base_link is required for a forest URDF")
-        return self.root_links[0]
+        return roots[0]
 
     def _default_tip(self, base: str) -> str:
-        candidates = []
-        for leaf in self.leaf_links:
-            try:
-                chain = self.chain(base, leaf)
-            except ValueError:
-                continue
-            candidates.append((sum(j.active for j in chain), len(chain), leaf))
-        if not candidates:
+        """Maximize active-joint count, path length, then lexical tip name."""
+        if base not in self.links:
             raise ValueError(f"no kinematic chain starts at {base!r}")
-        return max(candidates)[2]
+        children = {}
+        for joint in self.joints:
+            children.setdefault(joint.parent, []).append(joint)
+        pending = [(0, 0, base)]
+        best = pending[0]
+        while pending:
+            candidate = pending.pop()
+            active_count, length, parent = candidate
+            descendants = children.get(parent)
+            if not descendants:
+                best = max(best, candidate)
+                continue
+            for joint in descendants:
+                pending.append((active_count + joint.active, length + 1, joint.child))
+        return best[2]
 
     @classmethod
     def from_urdf(cls, path: str | Path) -> RobotModel:
         source = Path(path).expanduser().resolve()
         if not source.is_file():
             raise FileNotFoundError(source)
-        root = ET.parse(source).getroot()
+        try:
+            root = ET.parse(source).getroot()
+        except ET.ParseError as exc:
+            raise ValueError(f"invalid URDF XML in {source}: {exc}") from exc
         if root.tag != "robot":
             raise ValueError("URDF root must be <robot>")
         link_nodes = root.findall("link")

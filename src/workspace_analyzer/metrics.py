@@ -52,6 +52,13 @@ def _validate_task_weights(task, weights, *, dtype=float):
         raise ValueError("task must be 'position', 'rotation', or 'pose'")
     rows = 6 if task == "pose" else 3
     if weights is not None:
+        input_dtype = getattr(weights, "dtype", None)
+        if (
+            getattr(input_dtype, "is_complex", False)
+            or getattr(input_dtype, "kind", None) == "c"
+            or (input_dtype is None and np.iscomplexobj(weights))
+        ):
+            raise ValueError("weights must contain only real values")
         with np.errstate(over="ignore", invalid="ignore"):
             weights_array = np.asarray(weights, dtype=float)
         if (
@@ -137,11 +144,10 @@ def _joint_limit_margin_numpy(solver, q):
     limits = solver.joint_limits
     half_range = (limits[:, 1] - limits[:, 0]) * 0.5
     margin = np.minimum(q - limits[:, 0], limits[:, 1] - q) / half_range
-    continuous = np.asarray(
-        [joint.kind == "continuous" for joint in solver.active_joints]
-    )
-    margin[:, continuous] = 1.0
-    return np.clip(margin, 0.0, 1.0).min(axis=-1)
+    if solver._continuous_indices:
+        margin[:, list(solver._continuous_indices)] = 1.0
+    np.clip(margin, 0.0, 1.0, out=margin)
+    return margin.min(axis=-1)
 
 
 def _joint_limit_margin_torch(solver, q):
@@ -150,10 +156,6 @@ def _joint_limit_margin_torch(solver, q):
     limits = solver._array(solver.joint_limits)
     half_range = (limits[:, 1] - limits[:, 0]) * 0.5
     margin = torch.minimum(q - limits[:, 0], limits[:, 1] - q) / half_range
-    continuous = torch.as_tensor(
-        [joint.kind == "continuous" for joint in solver.active_joints],
-        dtype=torch.bool,
-        device=q.device,
-    )
-    margin[:, continuous] = 1.0
+    if solver._continuous_indices:
+        margin[:, list(solver._continuous_indices)] = 1.0
     return margin.clamp(0.0, 1.0).amin(dim=-1)

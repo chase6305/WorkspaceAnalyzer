@@ -187,19 +187,30 @@ def test_mutated_result_cannot_overwrite_valid_archive(tmp_path, mutation):
 
 
 @pytest.mark.parametrize("compressed", [False, True])
+@pytest.mark.parametrize("failure", ["write", "replace"])
 def test_failed_writer_preserves_previous_archive_and_cleans_temporary_file(
-    tmp_path, monkeypatch, compressed
+    tmp_path, monkeypatch, compressed, failure
 ):
+    import workspace_analyzer._atomic as atomic
+
     result = AnalysisResult(np.zeros((1, 3)), np.zeros((1, 1)), None, {})
     path = tmp_path / "result.npz"
     result.save(path)
     original = path.read_bytes()
 
-    def fail(path, **payload):
-        Path(path).write_bytes(b"partial archive")
-        raise OSError("simulated disk failure")
+    if failure == "write":
 
-    monkeypatch.setattr(np, "savez_compressed" if compressed else "savez", fail)
+        def fail(stream, **payload):
+            stream.write(b"partial archive")
+            raise OSError("simulated disk failure")
+
+        monkeypatch.setattr(np, "savez_compressed" if compressed else "savez", fail)
+    else:
+
+        def fail(*args):
+            raise OSError("simulated disk failure")
+
+        monkeypatch.setattr(atomic.os, "replace", fail)
     with pytest.raises(OSError, match="disk failure"):
         result.save(path, compressed=compressed)
     assert path.read_bytes() == original
@@ -247,3 +258,31 @@ def test_truncated_zip_has_clear_error_and_missing_file_keeps_os_error(tmp_path)
         AnalysisResult.load(path)
     with pytest.raises(FileNotFoundError):
         AnalysisResult.load(tmp_path / "absent.npz")
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_residual_summary_quantiles_and_empty_groups(dtype):
+    from workspace_analyzer.analyzer import _residual_summary
+
+    residual = np.array([1, 2, 3, 4], dtype=dtype)
+    summary = _residual_summary(residual, np.array([False, False, True, True]))
+    assert summary["all"] == pytest.approx(
+        {"min": 1, "median": 2.5, "p95": 3.85, "max": 4}
+    )
+    assert summary["reachable"] == pytest.approx(
+        {"min": 3, "median": 3.5, "p95": 3.95, "max": 4}
+    )
+    assert summary["unreachable"] == pytest.approx(
+        {"min": 1, "median": 1.5, "p95": 1.95, "max": 2}
+    )
+    assert _residual_summary(residual, np.ones(4, dtype=bool))["unreachable"] is None
+
+
+@pytest.mark.parametrize("dtype,value", [("float32", 3e38), ("float64", 1e308)])
+def test_residual_summary_median_stays_finite_near_dtype_limit(dtype, value):
+    from workspace_analyzer.analyzer import _residual_summary
+
+    residual = np.full(2, value, dtype=dtype)
+    with np.errstate(over="raise"):
+        summary = _residual_summary(residual, np.ones(2, dtype=bool))
+    assert summary["all"]["median"] == float(residual[0])

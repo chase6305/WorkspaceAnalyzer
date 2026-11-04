@@ -10,9 +10,11 @@ from zipfile import BadZipFile
 
 import numpy as np
 
+from ._arrays import as_numpy as _numpy
+from ._atomic import atomic_open, atomic_write_text
 from ._cancellation import check_cancelled
 from ._validation import require_integer
-from .analyzer import AnalysisResult, _numpy
+from .analyzer import AnalysisResult
 from .cache import _model_digest, _normalize
 from .kinematics import KinematicsSolver
 from .reachability import (
@@ -87,26 +89,10 @@ class IKStabilityResult:
         ):
             raise ValueError("initial seeds must match the trial count")
         baseline = self.results[0]
-        flags, qualities = [], []
-        for index, result in enumerate(self.results):
-            check_cancelled(cancel_event)
-            reachable, metrics = _assessment_arrays(result)
-            if self.initial_seeds is not None and self.initial_seeds[index] is not None:
-                seed = np.asarray(self.initial_seeds[index])
-                joints = np.asarray(result.joint_positions)
-                if joints.ndim != 2 or len(joints) != len(reachable):
-                    raise ValueError("joint measurements must have shape (N, DoF)")
-                dof = joints.shape[1]
-                if (
-                    seed.dtype.kind not in "iuf"
-                    or not seed.size
-                    or not np.isfinite(seed).all()
-                    or seed.shape not in {(dof,), (1, dof), (len(reachable), dof)}
-                ):
-                    raise ValueError(
-                        "initial seed must be finite with compatible target/joint shape"
-                    )
-            quality = _validated_quality_flags(result, reachable, metrics)
+        baseline_reachable, baseline_metrics = _assessment_arrays(baseline)
+        check_cancelled(cancel_event)
+        shared_metadata = {
+            key: _normalize(baseline.metadata.get(key))
             for key in (
                 "robot",
                 "base_link",
@@ -125,20 +111,46 @@ class IKStabilityResult:
                 "joint_kinds",
                 "base_from_targets",
                 "collision_checked",
-            ):
-                if _normalize(result.metadata.get(key)) != _normalize(
-                    baseline.metadata.get(key)
+            )
+        }
+        shared_solver_settings = {
+            key: value
+            for key, value in baseline.metadata.get("solver_settings", {}).items()
+            if key not in {"max_iterations", "random_seed"}
+        }
+        flags, qualities = [], []
+        for index, result in enumerate(self.results):
+            check_cancelled(cancel_event)
+            reachable, metrics = (
+                (baseline_reachable, baseline_metrics)
+                if index == 0
+                else _assessment_arrays(result)
+            )
+            if self.initial_seeds is not None and self.initial_seeds[index] is not None:
+                seed = np.asarray(self.initial_seeds[index])
+                joints = np.asarray(result.joint_positions)
+                if joints.ndim != 2 or len(joints) != len(reachable):
+                    raise ValueError("joint measurements must have shape (N, DoF)")
+                dof = joints.shape[1]
+                if (
+                    seed.dtype.kind not in "iuf"
+                    or not seed.size
+                    or not np.isfinite(seed).all()
+                    or seed.shape not in {(dof,), (1, dof), (len(reachable), dof)}
                 ):
+                    raise ValueError(
+                        "initial seed must be finite with compatible target/joint shape"
+                    )
+            quality = _validated_quality_flags(result, reachable, metrics)
+            for key, expected in shared_metadata.items():
+                if _normalize(result.metadata.get(key)) != expected:
                     raise ValueError(f"stability results must share {key}")
-
-            def settings(item):
-                return {
-                    key: value
-                    for key, value in item.metadata.get("solver_settings", {}).items()
-                    if key not in {"max_iterations", "random_seed"}
-                }
-
-            if settings(result) != settings(baseline):
+            solver_settings = {
+                key: value
+                for key, value in result.metadata.get("solver_settings", {}).items()
+                if key not in {"max_iterations", "random_seed"}
+            }
+            if solver_settings != shared_solver_settings:
                 raise ValueError(
                     "stability results must share non-budget solver settings"
                 )
@@ -284,22 +296,20 @@ class IKStabilityResult:
         )
 
     def save(self, directory: str | Path) -> None:
-        report = self.to_dict()
+        report = json.dumps(self.to_dict(), indent=2, allow_nan=False) + "\n"
         directory = Path(directory)
-        directory.mkdir(parents=True, exist_ok=True)
         for index, result in enumerate(self.results):
             result.save(directory / f"trial_{index:03d}.npz")
-        np.savez_compressed(
-            directory / "initial_seeds.npz",
-            **{
-                f"trial_{index:03d}": seed
-                for index, seed in enumerate(self.initial_seeds or ())
-                if seed is not None
-            },
-        )
-        (directory / "report.json").write_text(
-            json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8"
-        )
+        with atomic_open(directory / "initial_seeds.npz") as stream:
+            np.savez_compressed(
+                stream,
+                **{
+                    f"trial_{index:03d}": seed
+                    for index, seed in enumerate(self.initial_seeds or ())
+                    if seed is not None
+                },
+            )
+        atomic_write_text(directory / "report.json", report)
 
     @classmethod
     def load(cls, directory: str | Path):

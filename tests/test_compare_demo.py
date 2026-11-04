@@ -136,3 +136,133 @@ def test_full_rank_hull_precision_failure_is_unavailable(monkeypatch):
 
     monkeypatch.setattr(spatial, "ConvexHull", fail)
     assert MODULE._convex_hull_volume(np.vstack((np.zeros(3), np.eye(3)))) is None
+
+
+@pytest.mark.parametrize("backend", ["numpy", "torch"])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_comparison_analysis_matches_direct_kinematics_and_quality(backend, dtype):
+    from workspace_analyzer import create_solver
+
+    if backend == "torch":
+        pytest.importorskip("torch")
+    solver = create_solver(
+        Path(__file__).parent / "fixtures/mixed_chain.urdf",
+        backend=backend,
+        device="cpu",
+        dtype=dtype,
+    )
+    unit_positions = np.random.default_rng(17).random((31, solver.dof))
+    result = MODULE._analyze(solver, unit_positions)
+    poses = solver.forward(result.joint_positions)
+    quality = solver.dexterity(result.joint_positions)
+
+    def measurement(value):
+        return value.detach().cpu().numpy() if hasattr(value, "detach") else value
+
+    np.testing.assert_allclose(result.points, measurement(poses)[:, :3, 3], atol=1e-7)
+    np.testing.assert_allclose(
+        result.manipulability, measurement(quality.manipulability), atol=1e-7
+    )
+    for name, values in result.metrics.items():
+        np.testing.assert_allclose(
+            values, measurement(getattr(quality, name)), atol=1e-7
+        )
+
+
+@pytest.mark.parametrize(
+    "reference,comparison", [(None, None), (None, 2), (2, None), (0, 2), (0, 0), (2, 3)]
+)
+def test_comparison_ratios_handle_unavailable_and_zero_measurements(
+    reference, comparison
+):
+    import json
+
+    def robot(measurement):
+        return {
+            "reference_base_frame_aabb_volume": measurement,
+            "reference_base_frame_convex_hull_volume": measurement,
+            "urdf_effective_arm_length": 1.0,
+            "normalization_arm_length": 1.0,
+            "normalized_convex_hull_volume": measurement,
+            "metrics": {
+                name: {"median": measurement}
+                for name in ("manipulability", "minimum_singular_value", "isotropy")
+            },
+            "normalized_metrics": {
+                "manipulability_over_length_cubed": {"median": measurement}
+            },
+        }
+
+    summary = MODULE._relative_summary(
+        {
+            "robots": {"dexforce_w1": robot(reference), "marvin_m6": robot(comparison)},
+            "shared_position_targets": {
+                "dexforce_w1": {"success_rate": 0.5},
+                "marvin_m6": {"success_rate": 0.75},
+            },
+        }
+    )
+    expected = (
+        None if comparison is None or reference in (None, 0) else comparison / reference
+    )
+    for name, value in summary.items():
+        if name in (
+            "urdf_effective_arm_length_ratio",
+            "normalization_arm_length_ratio",
+        ):
+            assert value == 1
+        elif name == "shared_target_success_rate_difference":
+            assert value == 0.25
+        else:
+            assert value == expected
+    json.dumps(summary, allow_nan=False)
+
+
+@pytest.mark.parametrize("stage", ["second_viewer", "workspace"])
+def test_comparison_setup_failure_closes_created_viewers(stage, monkeypatch):
+    import argparse
+    import socket
+
+    pytest.importorskip("viser")
+    pytest.importorskip("trimesh")
+    import workspace_analyzer.visualization as visualization
+    from workspace_analyzer import create_solver
+
+    solver = create_solver(
+        Path(__file__).parent / "fixtures/two_link.urdf", backend="numpy"
+    )
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    args = argparse.Namespace(
+        port=port, no_visuals=True, reference_link_index=1, autoplay=False
+    )
+    viewer_class = visualization.ViserWorkspace
+    created = []
+
+    def create_viewer(*args, **kwargs):
+        if stage == "second_viewer" and kwargs.get("server") is not None:
+            raise RuntimeError("comparison setup failed")
+        viewer = viewer_class(*args, **kwargs)
+        created.append(viewer)
+        return viewer
+
+    def fail_workspace(*args, **kwargs):
+        raise RuntimeError("comparison setup failed")
+
+    monkeypatch.setattr(visualization, "ViserWorkspace", create_viewer)
+    monkeypatch.setattr(viewer_class, "add_workspace", fail_workspace)
+    try:
+        with pytest.raises(RuntimeError, match="comparison setup failed"):
+            MODULE._visualize(
+                {"dexforce_w1": solver, "marvin_m6": solver},
+                {"dexforce_w1": None, "marvin_m6": None},
+                {},
+                {},
+                args,
+            )
+        assert len(created) == (1 if stage == "second_viewer" else 2)
+        assert all(viewer._closed for viewer in created)
+    finally:
+        for viewer in created:
+            viewer.close()

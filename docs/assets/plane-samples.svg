@@ -1,0 +1,192 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 570" role="img" aria-label="Measured plane reachability">
+<rect width="560" height="570" fill="white"/>
+<g font-family="sans-serif" font-size="13" fill="#203047">
+<text x="64" y="24" font-size="19">XY · base</text>
+<text x="64" y="44">IK solved: 81/169</text>
+<rect x="64" y="56" width="420" height="420" fill="#f3f5f7" stroke="#aab4c2"/>
+<circle cx="64.000" cy="476.000" r="5.500" fill="#ce4653"><title>Target 0: -1.5, -1.5 m; IK not solved; residual 0.7071</title></circle>
+<circle cx="64.000" cy="441.000" r="5.500" fill="#ce4653"><title>Target 1: -1.5, -1.25 m; IK not solved; residual 0.559</title></circle>
+<circle cx="64.000" cy="406.000" r="5.500" fill="#ce4653"><title>Target 2: -1.5, -1 m; IK not solved; residual 0.5</title></circle>
+<circle cx="64.000" cy="371.000" r="5.500" fill="#ce4653"><title>Target 3: -1.5, -0.75 m; IK not solved; residual 0.5</title></circle>
+<circle cx="64.000" cy="336.000" r="5.500" fill="#ce4653"><title>Target 4: -1.5, -0.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="64.000" cy="301.000" r="5.500" fill="#ce4653"><title>Target 5: -1.5, -0.25 m; IK not solved; residual 0.5</title></circle>
+<circle cx="64.000" cy="266.000" r="5.500" fill="#ce4653"><title>Target 6: -1.5, 0 m; IK not solved; residual 0.5</title></circle>
+<circle cx="64.000" cy="231.000" r="5.500" fill="#ce4653"><title>Target 7: -1.5, 0.25 m; IK not solved; residual 0.5</title></circle>
+<circle cx="64.000" cy="196.000" r="5.500" fill="#ce4653"><title>Target 8: -1.5, 0.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="64.000" cy="161.000" r="5.500" fill="#ce4653"><title>Target 9: -1.5, 0.75 m; IK not solved; residual 0.5</title></circle>
+<circle cx="64.000" cy="126.000" r="5.500" fill="#ce4653"><title>Target 10: -1.5, 1 m; IK not solved; residual 0.5</title></circle>
+<circle cx="64.000" cy="91.000" r="5.500" fill="#ce4653"><title>Target 11: -1.5, 1.25 m; IK not solved; residual 0.559</title></circle>
+<circle cx="64.000" cy="56.000" r="5.500" fill="#ce4653"><title>Target 12: -1.5, 1.5 m; IK not solved; residual 0.7071</title></circle>
+<circle cx="99.000" cy="476.000" r="5.500" fill="#ce4653"><title>Target 13: -1.25, -1.5 m; IK not solved; residual 0.559</title></circle>
+<circle cx="99.000" cy="441.000" r="5.500" fill="#ce4653"><title>Target 14: -1.25, -1.25 m; IK not solved; residual 0.3536</title></circle>
+<circle cx="99.000" cy="406.000" r="5.500" fill="#ce4653"><title>Target 15: -1.25, -1 m; IK not solved; residual 0.25</title></circle>
+<circle cx="99.000" cy="371.000" r="5.500" fill="#ce4653"><title>Target 16: -1.25, -0.75 m; IK not solved; residual 0.25</title></circle>
+<circle cx="99.000" cy="336.000" r="5.500" fill="#ce4653"><title>Target 17: -1.25, -0.5 m; IK not solved; residual 0.25</title></circle>
+<circle cx="99.000" cy="301.000" r="5.500" fill="#ce4653"><title>Target 18: -1.25, -0.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="99.000" cy="266.000" r="5.500" fill="#ce4653"><title>Target 19: -1.25, 0 m; IK not solved; residual 0.25</title></circle>
+<circle cx="99.000" cy="231.000" r="5.500" fill="#ce4653"><title>Target 20: -1.25, 0.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="99.000" cy="196.000" r="5.500" fill="#ce4653"><title>Target 21: -1.25, 0.5 m; IK not solved; residual 0.25</title></circle>
+<circle cx="99.000" cy="161.000" r="5.500" fill="#ce4653"><title>Target 22: -1.25, 0.75 m; IK not solved; residual 0.25</title></circle>
+<circle cx="99.000" cy="126.000" r="5.500" fill="#ce4653"><title>Target 23: -1.25, 1 m; IK not solved; residual 0.25</title></circle>
+<circle cx="99.000" cy="91.000" r="5.500" fill="#ce4653"><title>Target 24: -1.25, 1.25 m; IK not solved; residual 0.3536</title></circle>
+<circle cx="99.000" cy="56.000" r="5.500" fill="#ce4653"><title>Target 25: -1.25, 1.5 m; IK not solved; residual 0.559</title></circle>
+<circle cx="134.000" cy="476.000" r="5.500" fill="#ce4653"><title>Target 26: -1, -1.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="134.000" cy="441.000" r="5.500" fill="#ce4653"><title>Target 27: -1, -1.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="134.000" cy="406.000" r="5.500" fill="#16846a"><title>Target 28: -1, -1 m; quality accepted; residual 2.896e-06</title></circle>
+<circle cx="134.000" cy="371.000" r="5.500" fill="#16846a"><title>Target 29: -1, -0.75 m; quality accepted; residual 2.105e-06</title></circle>
+<circle cx="134.000" cy="336.000" r="5.500" fill="#16846a"><title>Target 30: -1, -0.5 m; quality accepted; residual 2.051e-06</title></circle>
+<circle cx="134.000" cy="301.000" r="5.500" fill="#16846a"><title>Target 31: -1, -0.25 m; quality accepted; residual 2.048e-06</title></circle>
+<circle cx="134.000" cy="266.000" r="5.500" fill="#16846a"><title>Target 32: -1, 0 m; quality accepted; residual 2.048e-06</title></circle>
+<circle cx="134.000" cy="231.000" r="5.500" fill="#16846a"><title>Target 33: -1, 0.25 m; quality accepted; residual 2.048e-06</title></circle>
+<circle cx="134.000" cy="196.000" r="5.500" fill="#16846a"><title>Target 34: -1, 0.5 m; quality accepted; residual 2.051e-06</title></circle>
+<circle cx="134.000" cy="161.000" r="5.500" fill="#16846a"><title>Target 35: -1, 0.75 m; quality accepted; residual 2.105e-06</title></circle>
+<circle cx="134.000" cy="126.000" r="5.500" fill="#16846a"><title>Target 36: -1, 1 m; quality accepted; residual 2.896e-06</title></circle>
+<circle cx="134.000" cy="91.000" r="5.500" fill="#ce4653"><title>Target 37: -1, 1.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="134.000" cy="56.000" r="5.500" fill="#ce4653"><title>Target 38: -1, 1.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="169.000" cy="476.000" r="5.500" fill="#ce4653"><title>Target 39: -0.75, -1.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="169.000" cy="441.000" r="5.500" fill="#ce4653"><title>Target 40: -0.75, -1.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="169.000" cy="406.000" r="5.500" fill="#16846a"><title>Target 41: -0.75, -1 m; quality accepted; residual 2.105e-06</title></circle>
+<circle cx="169.000" cy="371.000" r="5.500" fill="#16846a"><title>Target 42: -0.75, -0.75 m; quality accepted; residual 3.439e-06</title></circle>
+<circle cx="169.000" cy="336.000" r="5.500" fill="#16846a"><title>Target 43: -0.75, -0.5 m; quality accepted; residual 2.496e-06</title></circle>
+<circle cx="169.000" cy="301.000" r="5.500" fill="#16846a"><title>Target 44: -0.75, -0.25 m; quality accepted; residual 2.435e-06</title></circle>
+<circle cx="169.000" cy="266.000" r="5.500" fill="#16846a"><title>Target 45: -0.75, 0 m; quality accepted; residual 2.432e-06</title></circle>
+<circle cx="169.000" cy="231.000" r="5.500" fill="#16846a"><title>Target 46: -0.75, 0.25 m; quality accepted; residual 2.435e-06</title></circle>
+<circle cx="169.000" cy="196.000" r="5.500" fill="#16846a"><title>Target 47: -0.75, 0.5 m; quality accepted; residual 2.496e-06</title></circle>
+<circle cx="169.000" cy="161.000" r="5.500" fill="#16846a"><title>Target 48: -0.75, 0.75 m; quality accepted; residual 3.439e-06</title></circle>
+<circle cx="169.000" cy="126.000" r="5.500" fill="#16846a"><title>Target 49: -0.75, 1 m; quality accepted; residual 2.105e-06</title></circle>
+<circle cx="169.000" cy="91.000" r="5.500" fill="#ce4653"><title>Target 50: -0.75, 1.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="169.000" cy="56.000" r="5.500" fill="#ce4653"><title>Target 51: -0.75, 1.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="204.000" cy="476.000" r="5.500" fill="#ce4653"><title>Target 52: -0.5, -1.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="204.000" cy="441.000" r="5.500" fill="#ce4653"><title>Target 53: -0.5, -1.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="204.000" cy="406.000" r="5.500" fill="#16846a"><title>Target 54: -0.5, -1 m; quality accepted; residual 2.051e-06</title></circle>
+<circle cx="204.000" cy="371.000" r="5.500" fill="#16846a"><title>Target 55: -0.5, -0.75 m; quality accepted; residual 2.496e-06</title></circle>
+<circle cx="204.000" cy="336.000" r="5.500" fill="#16846a"><title>Target 56: -0.5, -0.5 m; quality accepted; residual 3.983e-06</title></circle>
+<circle cx="204.000" cy="301.000" r="5.500" fill="#16846a"><title>Target 57: -0.5, -0.25 m; quality accepted; residual 2.888e-06</title></circle>
+<circle cx="204.000" cy="266.000" r="5.500" fill="#16846a"><title>Target 58: -0.5, 0 m; quality accepted; residual 2.816e-06</title></circle>
+<circle cx="204.000" cy="231.000" r="5.500" fill="#16846a"><title>Target 59: -0.5, 0.25 m; quality accepted; residual 2.888e-06</title></circle>
+<circle cx="204.000" cy="196.000" r="5.500" fill="#16846a"><title>Target 60: -0.5, 0.5 m; quality accepted; residual 3.983e-06</title></circle>
+<circle cx="204.000" cy="161.000" r="5.500" fill="#16846a"><title>Target 61: -0.5, 0.75 m; quality accepted; residual 2.496e-06</title></circle>
+<circle cx="204.000" cy="126.000" r="5.500" fill="#16846a"><title>Target 62: -0.5, 1 m; quality accepted; residual 2.051e-06</title></circle>
+<circle cx="204.000" cy="91.000" r="5.500" fill="#ce4653"><title>Target 63: -0.5, 1.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="204.000" cy="56.000" r="5.500" fill="#ce4653"><title>Target 64: -0.5, 1.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="239.000" cy="476.000" r="5.500" fill="#ce4653"><title>Target 65: -0.25, -1.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="239.000" cy="441.000" r="5.500" fill="#ce4653"><title>Target 66: -0.25, -1.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="239.000" cy="406.000" r="5.500" fill="#16846a"><title>Target 67: -0.25, -1 m; quality accepted; residual 2.048e-06</title></circle>
+<circle cx="239.000" cy="371.000" r="5.500" fill="#16846a"><title>Target 68: -0.25, -0.75 m; quality accepted; residual 2.435e-06</title></circle>
+<circle cx="239.000" cy="336.000" r="5.500" fill="#16846a"><title>Target 69: -0.25, -0.5 m; quality accepted; residual 2.888e-06</title></circle>
+<circle cx="239.000" cy="301.000" r="5.500" fill="#16846a"><title>Target 70: -0.25, -0.25 m; quality accepted; residual 4.526e-06</title></circle>
+<circle cx="239.000" cy="266.000" r="5.500" fill="#16846a"><title>Target 71: -0.25, 0 m; quality accepted; residual 3.2e-06</title></circle>
+<circle cx="239.000" cy="231.000" r="5.500" fill="#16846a"><title>Target 72: -0.25, 0.25 m; quality accepted; residual 4.526e-06</title></circle>
+<circle cx="239.000" cy="196.000" r="5.500" fill="#16846a"><title>Target 73: -0.25, 0.5 m; quality accepted; residual 2.888e-06</title></circle>
+<circle cx="239.000" cy="161.000" r="5.500" fill="#16846a"><title>Target 74: -0.25, 0.75 m; quality accepted; residual 2.435e-06</title></circle>
+<circle cx="239.000" cy="126.000" r="5.500" fill="#16846a"><title>Target 75: -0.25, 1 m; quality accepted; residual 2.048e-06</title></circle>
+<circle cx="239.000" cy="91.000" r="5.500" fill="#ce4653"><title>Target 76: -0.25, 1.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="239.000" cy="56.000" r="5.500" fill="#ce4653"><title>Target 77: -0.25, 1.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="274.000" cy="476.000" r="5.500" fill="#ce4653"><title>Target 78: 0, -1.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="274.000" cy="441.000" r="5.500" fill="#ce4653"><title>Target 79: 0, -1.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="274.000" cy="406.000" r="5.500" fill="#16846a"><title>Target 80: 0, -1 m; quality accepted; residual 2.048e-06</title></circle>
+<circle cx="274.000" cy="371.000" r="5.500" fill="#16846a"><title>Target 81: 0, -0.75 m; quality accepted; residual 2.432e-06</title></circle>
+<circle cx="274.000" cy="336.000" r="5.500" fill="#16846a"><title>Target 82: 0, -0.5 m; quality accepted; residual 2.816e-06</title></circle>
+<circle cx="274.000" cy="301.000" r="5.500" fill="#16846a"><title>Target 83: 0, -0.25 m; quality accepted; residual 3.2e-06</title></circle>
+<circle cx="274.000" cy="266.000" r="5.500" fill="#16846a"><title>Target 84: 0, 0 m; quality accepted; residual 0</title></circle>
+<circle cx="274.000" cy="231.000" r="5.500" fill="#16846a"><title>Target 85: 0, 0.25 m; quality accepted; residual 3.2e-06</title></circle>
+<circle cx="274.000" cy="196.000" r="5.500" fill="#16846a"><title>Target 86: 0, 0.5 m; quality accepted; residual 2.816e-06</title></circle>
+<circle cx="274.000" cy="161.000" r="5.500" fill="#16846a"><title>Target 87: 0, 0.75 m; quality accepted; residual 2.432e-06</title></circle>
+<circle cx="274.000" cy="126.000" r="5.500" fill="#16846a"><title>Target 88: 0, 1 m; quality accepted; residual 2.048e-06</title></circle>
+<circle cx="274.000" cy="91.000" r="5.500" fill="#ce4653"><title>Target 89: 0, 1.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="274.000" cy="56.000" r="5.500" fill="#ce4653"><title>Target 90: 0, 1.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="309.000" cy="476.000" r="5.500" fill="#ce4653"><title>Target 91: 0.25, -1.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="309.000" cy="441.000" r="5.500" fill="#ce4653"><title>Target 92: 0.25, -1.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="309.000" cy="406.000" r="5.500" fill="#16846a"><title>Target 93: 0.25, -1 m; quality accepted; residual 2.048e-06</title></circle>
+<circle cx="309.000" cy="371.000" r="5.500" fill="#16846a"><title>Target 94: 0.25, -0.75 m; quality accepted; residual 2.435e-06</title></circle>
+<circle cx="309.000" cy="336.000" r="5.500" fill="#16846a"><title>Target 95: 0.25, -0.5 m; quality accepted; residual 2.888e-06</title></circle>
+<circle cx="309.000" cy="301.000" r="5.500" fill="#16846a"><title>Target 96: 0.25, -0.25 m; quality accepted; residual 4.526e-06</title></circle>
+<circle cx="309.000" cy="266.000" r="5.500" fill="#16846a"><title>Target 97: 0.25, 0 m; quality accepted; residual 3.2e-06</title></circle>
+<circle cx="309.000" cy="231.000" r="5.500" fill="#16846a"><title>Target 98: 0.25, 0.25 m; quality accepted; residual 4.526e-06</title></circle>
+<circle cx="309.000" cy="196.000" r="5.500" fill="#16846a"><title>Target 99: 0.25, 0.5 m; quality accepted; residual 2.888e-06</title></circle>
+<circle cx="309.000" cy="161.000" r="5.500" fill="#16846a"><title>Target 100: 0.25, 0.75 m; quality accepted; residual 2.435e-06</title></circle>
+<circle cx="309.000" cy="126.000" r="5.500" fill="#16846a"><title>Target 101: 0.25, 1 m; quality accepted; residual 2.048e-06</title></circle>
+<circle cx="309.000" cy="91.000" r="5.500" fill="#ce4653"><title>Target 102: 0.25, 1.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="309.000" cy="56.000" r="5.500" fill="#ce4653"><title>Target 103: 0.25, 1.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="344.000" cy="476.000" r="5.500" fill="#ce4653"><title>Target 104: 0.5, -1.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="344.000" cy="441.000" r="5.500" fill="#ce4653"><title>Target 105: 0.5, -1.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="344.000" cy="406.000" r="5.500" fill="#16846a"><title>Target 106: 0.5, -1 m; quality accepted; residual 2.051e-06</title></circle>
+<circle cx="344.000" cy="371.000" r="5.500" fill="#16846a"><title>Target 107: 0.5, -0.75 m; quality accepted; residual 2.496e-06</title></circle>
+<circle cx="344.000" cy="336.000" r="5.500" fill="#16846a"><title>Target 108: 0.5, -0.5 m; quality accepted; residual 3.983e-06</title></circle>
+<circle cx="344.000" cy="301.000" r="5.500" fill="#16846a"><title>Target 109: 0.5, -0.25 m; quality accepted; residual 2.888e-06</title></circle>
+<circle cx="344.000" cy="266.000" r="5.500" fill="#16846a"><title>Target 110: 0.5, 0 m; quality accepted; residual 2.816e-06</title></circle>
+<circle cx="344.000" cy="231.000" r="5.500" fill="#16846a"><title>Target 111: 0.5, 0.25 m; quality accepted; residual 2.888e-06</title></circle>
+<circle cx="344.000" cy="196.000" r="5.500" fill="#16846a"><title>Target 112: 0.5, 0.5 m; quality accepted; residual 3.983e-06</title></circle>
+<circle cx="344.000" cy="161.000" r="5.500" fill="#16846a"><title>Target 113: 0.5, 0.75 m; quality accepted; residual 2.496e-06</title></circle>
+<circle cx="344.000" cy="126.000" r="5.500" fill="#16846a"><title>Target 114: 0.5, 1 m; quality accepted; residual 2.051e-06</title></circle>
+<circle cx="344.000" cy="91.000" r="5.500" fill="#ce4653"><title>Target 115: 0.5, 1.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="344.000" cy="56.000" r="5.500" fill="#ce4653"><title>Target 116: 0.5, 1.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="379.000" cy="476.000" r="5.500" fill="#ce4653"><title>Target 117: 0.75, -1.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="379.000" cy="441.000" r="5.500" fill="#ce4653"><title>Target 118: 0.75, -1.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="379.000" cy="406.000" r="5.500" fill="#16846a"><title>Target 119: 0.75, -1 m; quality accepted; residual 2.105e-06</title></circle>
+<circle cx="379.000" cy="371.000" r="5.500" fill="#16846a"><title>Target 120: 0.75, -0.75 m; quality accepted; residual 3.439e-06</title></circle>
+<circle cx="379.000" cy="336.000" r="5.500" fill="#16846a"><title>Target 121: 0.75, -0.5 m; quality accepted; residual 2.496e-06</title></circle>
+<circle cx="379.000" cy="301.000" r="5.500" fill="#16846a"><title>Target 122: 0.75, -0.25 m; quality accepted; residual 2.435e-06</title></circle>
+<circle cx="379.000" cy="266.000" r="5.500" fill="#16846a"><title>Target 123: 0.75, 0 m; quality accepted; residual 2.432e-06</title></circle>
+<circle cx="379.000" cy="231.000" r="5.500" fill="#16846a"><title>Target 124: 0.75, 0.25 m; quality accepted; residual 2.435e-06</title></circle>
+<circle cx="379.000" cy="196.000" r="5.500" fill="#16846a"><title>Target 125: 0.75, 0.5 m; quality accepted; residual 2.496e-06</title></circle>
+<circle cx="379.000" cy="161.000" r="5.500" fill="#16846a"><title>Target 126: 0.75, 0.75 m; quality accepted; residual 3.439e-06</title></circle>
+<circle cx="379.000" cy="126.000" r="5.500" fill="#16846a"><title>Target 127: 0.75, 1 m; quality accepted; residual 2.105e-06</title></circle>
+<circle cx="379.000" cy="91.000" r="5.500" fill="#ce4653"><title>Target 128: 0.75, 1.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="379.000" cy="56.000" r="5.500" fill="#ce4653"><title>Target 129: 0.75, 1.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="414.000" cy="476.000" r="5.500" fill="#ce4653"><title>Target 130: 1, -1.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="414.000" cy="441.000" r="5.500" fill="#ce4653"><title>Target 131: 1, -1.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="414.000" cy="406.000" r="5.500" fill="#16846a"><title>Target 132: 1, -1 m; quality accepted; residual 2.896e-06</title></circle>
+<circle cx="414.000" cy="371.000" r="5.500" fill="#16846a"><title>Target 133: 1, -0.75 m; quality accepted; residual 2.105e-06</title></circle>
+<circle cx="414.000" cy="336.000" r="5.500" fill="#16846a"><title>Target 134: 1, -0.5 m; quality accepted; residual 2.051e-06</title></circle>
+<circle cx="414.000" cy="301.000" r="5.500" fill="#16846a"><title>Target 135: 1, -0.25 m; quality accepted; residual 2.048e-06</title></circle>
+<circle cx="414.000" cy="266.000" r="5.500" fill="#16846a"><title>Target 136: 1, 0 m; quality accepted; residual 2.048e-06</title></circle>
+<circle cx="414.000" cy="231.000" r="5.500" fill="#16846a"><title>Target 137: 1, 0.25 m; quality accepted; residual 2.048e-06</title></circle>
+<circle cx="414.000" cy="196.000" r="5.500" fill="#16846a"><title>Target 138: 1, 0.5 m; quality accepted; residual 2.051e-06</title></circle>
+<circle cx="414.000" cy="161.000" r="5.500" fill="#16846a"><title>Target 139: 1, 0.75 m; quality accepted; residual 2.105e-06</title></circle>
+<circle cx="414.000" cy="126.000" r="5.500" fill="#16846a"><title>Target 140: 1, 1 m; quality accepted; residual 2.896e-06</title></circle>
+<circle cx="414.000" cy="91.000" r="5.500" fill="#ce4653"><title>Target 141: 1, 1.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="414.000" cy="56.000" r="5.500" fill="#ce4653"><title>Target 142: 1, 1.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="449.000" cy="476.000" r="5.500" fill="#ce4653"><title>Target 143: 1.25, -1.5 m; IK not solved; residual 0.559</title></circle>
+<circle cx="449.000" cy="441.000" r="5.500" fill="#ce4653"><title>Target 144: 1.25, -1.25 m; IK not solved; residual 0.3536</title></circle>
+<circle cx="449.000" cy="406.000" r="5.500" fill="#ce4653"><title>Target 145: 1.25, -1 m; IK not solved; residual 0.25</title></circle>
+<circle cx="449.000" cy="371.000" r="5.500" fill="#ce4653"><title>Target 146: 1.25, -0.75 m; IK not solved; residual 0.25</title></circle>
+<circle cx="449.000" cy="336.000" r="5.500" fill="#ce4653"><title>Target 147: 1.25, -0.5 m; IK not solved; residual 0.25</title></circle>
+<circle cx="449.000" cy="301.000" r="5.500" fill="#ce4653"><title>Target 148: 1.25, -0.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="449.000" cy="266.000" r="5.500" fill="#ce4653"><title>Target 149: 1.25, 0 m; IK not solved; residual 0.25</title></circle>
+<circle cx="449.000" cy="231.000" r="5.500" fill="#ce4653"><title>Target 150: 1.25, 0.25 m; IK not solved; residual 0.25</title></circle>
+<circle cx="449.000" cy="196.000" r="5.500" fill="#ce4653"><title>Target 151: 1.25, 0.5 m; IK not solved; residual 0.25</title></circle>
+<circle cx="449.000" cy="161.000" r="5.500" fill="#ce4653"><title>Target 152: 1.25, 0.75 m; IK not solved; residual 0.25</title></circle>
+<circle cx="449.000" cy="126.000" r="5.500" fill="#ce4653"><title>Target 153: 1.25, 1 m; IK not solved; residual 0.25</title></circle>
+<circle cx="449.000" cy="91.000" r="5.500" fill="#ce4653"><title>Target 154: 1.25, 1.25 m; IK not solved; residual 0.3536</title></circle>
+<circle cx="449.000" cy="56.000" r="5.500" fill="#ce4653"><title>Target 155: 1.25, 1.5 m; IK not solved; residual 0.559</title></circle>
+<circle cx="484.000" cy="476.000" r="5.500" fill="#ce4653"><title>Target 156: 1.5, -1.5 m; IK not solved; residual 0.7071</title></circle>
+<circle cx="484.000" cy="441.000" r="5.500" fill="#ce4653"><title>Target 157: 1.5, -1.25 m; IK not solved; residual 0.559</title></circle>
+<circle cx="484.000" cy="406.000" r="5.500" fill="#ce4653"><title>Target 158: 1.5, -1 m; IK not solved; residual 0.5</title></circle>
+<circle cx="484.000" cy="371.000" r="5.500" fill="#ce4653"><title>Target 159: 1.5, -0.75 m; IK not solved; residual 0.5</title></circle>
+<circle cx="484.000" cy="336.000" r="5.500" fill="#ce4653"><title>Target 160: 1.5, -0.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="484.000" cy="301.000" r="5.500" fill="#ce4653"><title>Target 161: 1.5, -0.25 m; IK not solved; residual 0.5</title></circle>
+<circle cx="484.000" cy="266.000" r="5.500" fill="#ce4653"><title>Target 162: 1.5, 0 m; IK not solved; residual 0.5</title></circle>
+<circle cx="484.000" cy="231.000" r="5.500" fill="#ce4653"><title>Target 163: 1.5, 0.25 m; IK not solved; residual 0.5</title></circle>
+<circle cx="484.000" cy="196.000" r="5.500" fill="#ce4653"><title>Target 164: 1.5, 0.5 m; IK not solved; residual 0.5</title></circle>
+<circle cx="484.000" cy="161.000" r="5.500" fill="#ce4653"><title>Target 165: 1.5, 0.75 m; IK not solved; residual 0.5</title></circle>
+<circle cx="484.000" cy="126.000" r="5.500" fill="#ce4653"><title>Target 166: 1.5, 1 m; IK not solved; residual 0.5</title></circle>
+<circle cx="484.000" cy="91.000" r="5.500" fill="#ce4653"><title>Target 167: 1.5, 1.25 m; IK not solved; residual 0.559</title></circle>
+<circle cx="484.000" cy="56.000" r="5.500" fill="#ce4653"><title>Target 168: 1.5, 1.5 m; IK not solved; residual 0.7071</title></circle>
+<text x="64.0" y="494" text-anchor="middle">-1.5</text>
+<text x="55" y="480.0" text-anchor="end">-1.5</text>
+<text x="169.0" y="494" text-anchor="middle">-0.75</text>
+<text x="55" y="375.0" text-anchor="end">-0.75</text>
+<text x="274.0" y="494" text-anchor="middle">0</text>
+<text x="55" y="270.0" text-anchor="end">0</text>
+<text x="379.0" y="494" text-anchor="middle">0.75</text>
+<text x="55" y="165.0" text-anchor="end">0.75</text>
+<text x="484.0" y="494" text-anchor="middle">1.5</text>
+<text x="55" y="60.0" text-anchor="end">1.5</text>
+<text x="274" y="516" text-anchor="middle">X (m)</text>
+<text x="17" y="266" text-anchor="middle" transform="rotate(-90 17 266)">Y (m)</text>
+<text x="64" y="538" fill="#16846a">● Quality accepted</text>
+<text x="270" y="538" fill="#d99b18">● Below quality gates</text>
+<text x="64" y="558" fill="#ce4653">● IK not solved</text>
+<text x="270" y="558">Sampled points only</text>
+</g></svg>

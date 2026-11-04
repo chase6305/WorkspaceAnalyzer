@@ -14,28 +14,57 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.parametrize("arm", ["left", "right"])
-def test_marvin_arm_construction_and_jacobian_accuracy(arm):
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize(
+    "backend,device", [("numpy", "cpu"), ("torch", "cpu"), ("torch", "cuda")]
+)
+def test_marvin_arm_construction_and_jacobian_accuracy(arm, dtype, backend, device):
+    if backend == "torch":
+        torch = pytest.importorskip("torch")
+        if device == "cuda" and not torch.cuda.is_available():
+            pytest.skip("CUDA device is unavailable")
+    chain = dict(base_link="base_link", tip_link=f"{arm}_ee")
     solver = create_solver(
-        str(MARVIN_URDF),
-        base_link="base_link",
-        tip_link=f"{arm}_ee",
-        backend="numpy",
-        dtype="float64",
+        MARVIN_URDF, backend=backend, device=device, dtype=dtype, **chain
     )
+    reference = create_solver(MARVIN_URDF, backend="numpy", dtype="float64", **chain)
     assert solver.dof == 7
     assert all(f"_{arm[0].upper()}_" in name for name in solver.joint_names)
-    q = default_reference_joints(solver)[None]
+    q = default_reference_joints(solver)[None].astype(dtype).astype(float)
     assert q[0, 3] == pytest.approx(-np.pi / 2)
-    jacobian = solver.jacobian(q)[0, :3]
+    jacobian = solver.jacobian(q)[0]
+    if hasattr(jacobian, "detach"):
+        jacobian = jacobian.detach().cpu().numpy()
+    assert jacobian.dtype == np.dtype(dtype)
+    rotation = reference.forward(q)[0, :3, :3]
+    tolerance = 1e-6 if dtype == "float32" else 1e-8
     epsilon = 1e-7
     for joint in range(solver.dof):
         plus, minus = q.copy(), q.copy()
         plus[0, joint] += epsilon
         minus[0, joint] -= epsilon
-        finite_difference = (
-            solver.forward(plus)[0, :3, 3] - solver.forward(minus)[0, :3, 3]
-        ) / (2 * epsilon)
-        np.testing.assert_allclose(jacobian[:, joint], finite_difference, atol=1e-8)
+        derivative = (reference.forward(plus)[0] - reference.forward(minus)[0]) / (
+            2 * epsilon
+        )
+        skew = derivative[:3, :3] @ rotation.T
+        finite_difference = np.r_[
+            derivative[:3, 3], [skew[2, 1], skew[0, 2], skew[1, 0]]
+        ]
+        np.testing.assert_allclose(
+            jacobian[:, joint], finite_difference, atol=tolerance, rtol=tolerance
+        )
+    if backend == "torch":
+        configuration = torch.tensor(
+            q[0], dtype=getattr(torch, dtype), device=device, requires_grad=True
+        )
+        derivative = torch.autograd.functional.jacobian(solver.forward, configuration)
+        pose = solver.forward(configuration)
+        skew = derivative[:3, :3].permute(2, 0, 1) @ pose[:3, :3].T
+        angular = torch.stack((skew[:, 2, 1], skew[:, 0, 2], skew[:, 1, 0]))
+        expected = torch.cat((derivative[:3, 3], angular))
+        torch.testing.assert_close(
+            solver.jacobian(configuration), expected, atol=tolerance, rtol=tolerance
+        )
 
 
 def test_marvin_visual_meshes_are_resolvable():

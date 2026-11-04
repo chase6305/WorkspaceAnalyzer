@@ -126,6 +126,74 @@ flowchart LR
 权重只重新统计；修改目标、初值、运动学模型、求解设置或 Jacobian 行权重时
 重新测量。固定 batch size 和目标顺序是复现重启候选的必要条件。
 
+本工作流的 `--seed` 同时控制目标采样和 IK 随机重启，默认 77。
+其他入口的默认值见[示例指南](../examples/README.md)；独立配置采样与 IK 种子见
+[Python API](python-api.md)。
+
 完整目标评估和离线重评 API 见 [可达性与灵巧度测试指南](reachability-testing.md)。
 本流程没有碰撞检查，质量门槛仍针对已经选中的 IK 配置。
 更多可引入的方案及验收标准见 [验证方案分析](validation-options.md)。
+
+六维 Jacobian 的混合关节差分验证、IK 姿态投影的数值/梯度对照及性能复现命令，
+见[第二十六轮记录](optimization-2026-09-13-round26.md)。
+
+## 单个平面任务的自动验收
+
+不需要执行全部高级诊断时，可对一个平面直接指定比例门槛：
+
+```bash
+python -m workspace_analyzer tests/fixtures/cartesian_stage.urdf \
+  --backend numpy --plane xy --span 3 --resolution 5 \
+  --ik-restarts 1 --ik-rescue-restarts 0 --progress --min-success-rate 0.36 \
+  --output outputs/accepted-plane.npz --report outputs/accepted-plane.json
+```
+
+解析机构得到 9/25，满足 0.36 时退出 0；将门槛提高至 0.37 则退出 1，
+NPZ/JSON 仍会保存，可检查未通过原因。单点质量门槛和整体质量通过比例分别使用
+`--min-joint-limit-margin` 等参数及 `--min-quality-pass-rate`。
+`workspace-analyzer inspect outputs/accepted-plane.npz` 可直接检查保存的数据；
+复评无需机器人资产，不调用 FK、IK 或 Jacobian，保留未明确覆盖的旧质量门槛。
+整体成功率和质量通过率要求也保留未覆盖项。例如原要求成功率 0.9、质量通过率 0.2，
+复评仅指定 `--min-quality-pass-rate 0.1` 仍会因 9/25 未达到 0.9 而退出 1。
+要替换全部验收要求，显式使用 `--reset-acceptance --min-quality-pass-rate 0.1`；
+此例将通过。单独使用 `--reset-acceptance` 只保留诊断，不再设置验收退出码。
+无需修改门槛也会根据逐点数据重算 PASS/FAIL，避免沿用过期的验收结论。
+完整命令、倾斜平面与错误恢复见[平面任务指南](plane-reachability.md)。
+
+本次持续检查的实际模型、采样规模、CPU/CUDA 结果与性能测试条件记录在
+[一小时验证记录](optimization-2026-09-13-hour.md)。
+
+## 分析报告与部分导出失败
+
+主 CLI 的四种分析模式均可指定 `--report`，与 `--output` 的 NPZ 分别保存。
+多实验套件的产物与部分保存状态见[示例指南](../examples/README.md)。
+
+| 入口 | JSON 内容 |
+| --- | --- |
+| joint / cartesian | `samples`、`dof`、`bounds`、`reachable`、`success_rate`、完整 `metadata`；与 `inspect` 的摘要一致 |
+| targets | 原有质量评测元数据，顶层保留 `assessment` 等字段 |
+| plane | 原有平面报告，顶层保留 `plane`、`samples`、`success_rate`、坐标变换和质量统计 |
+| inspect | 读取结果后的统一摘要，包含完整 `metadata` |
+
+`bounds` 为基座坐标系中的 `[XYZ最小值, XYZ最大值]`，长度单位为米。
+joint 模式只测量 FK 工作空间，其 `reachable` 和 `success_rate` 为 null。
+空结果的范围和成功率为 null，不将空数据记为验收成功。
+
+不依赖外部模型的 Cartesian 报告示例：
+
+```bash
+python -m workspace_analyzer tests/fixtures/cartesian_stage.urdf \
+  --backend numpy --mode cartesian --samples 16 --seed 42 \
+  --bounds -1.5 1.5 -1.5 1.5 0 0 --ik-restarts 1 --ik-rescue-restarts 0 \
+  --min-success-rate 0.3 --progress \
+  --output outputs/cartesian-report.npz --report outputs/cartesian-report.json
+```
+
+目标、NPZ、JSON、SVG 路径冲突在计算前报错。运行中某个文件写入失败时，
+仍尝试其余文件，并返回退出码 2、成功路径与失败原因；每个文件单独原子替换，
+整组文件不是一次事务。若只是验收比例未达标，仍导出全部诊断结果，退出码为 1。
+这些规则适用于四个分析模式和 `inspect`。
+
+目标文件扩展名应与内容一致：`.npy` 为数组，`.npz` 为带 `targets` 数组的归档。
+截断的 ZIP、损坏的压缩成员和格式不匹配均返回退出码 2，不显示堆栈，
+也不覆盖上一次已完成的结果。

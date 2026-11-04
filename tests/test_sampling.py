@@ -44,7 +44,10 @@ def test_sampling_config_rejects_invalid_sizes():
         SamplingConfig(batch_size=0)
 
 
-@pytest.mark.parametrize("dimensions,count", [(1, 3), (2, 17), (3, 29), (7, 130)])
+@pytest.mark.parametrize(
+    "dimensions,count",
+    [(1, 1), (1, 3), (1, 17), (2, 1), (2, 17), (3, 27), (3, 29), (7, 130)],
+)
 def test_uniform_sampling_preserves_meshgrid_order(dimensions, count):
     side = max(2, int(np.ceil(count ** (1 / dimensions))))
     grid = np.meshgrid(*([np.linspace(0, 1, side)] * dimensions), indexing="ij")

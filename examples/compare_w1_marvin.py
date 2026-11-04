@@ -9,6 +9,11 @@ from pathlib import Path
 import numpy as np
 
 from workspace_analyzer import AnalysisResult, create_solver
+from workspace_analyzer._arrays import as_numpy as _numpy
+from workspace_analyzer._atomic import atomic_write_text
+from workspace_analyzer._output_paths import validate_output_paths
+from workspace_analyzer.metrics import _dexterity_from_jacobian
+from workspace_analyzer.model import _rpy_matrix
 from workspace_analyzer.presets import (
     default_reference_joints,
     default_robot_urdf,
@@ -19,7 +24,7 @@ W1_URDF = default_robot_urdf("w1")
 MARVIN_URDF = default_robot_urdf()
 
 
-def main() -> None:
+def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--w1-urdf", "--robot-a-urdf", dest="w1_urdf", type=Path, default=W1_URDF
@@ -144,7 +149,26 @@ def main() -> None:
     parser.add_argument("--autoplay", action="store_true")
     parser.add_argument("--no-visuals", action="store_true")
     parser.add_argument("--port", type=int, default=8080)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    try:
+        return _run(args, parser)
+    except (ValueError, OSError, ImportError, RuntimeError) as exc:
+        parser.error(str(exc))
+
+
+def _run(args, parser):
+    _, args.report, _ = validate_output_paths(
+        report=args.report, inputs=(args.w1_urdf, args.marvin_urdf)
+    )
+    for name, value in vars(args).items():
+        if isinstance(value, float) and not np.isfinite(value):
+            parser.error(f"--{name.replace('_', '-')} must be finite")
+    for name in ("target_rpy", "circle_center_offset"):
+        value = getattr(args, name)
+        if value is not None and not np.isfinite(value).all():
+            parser.error(f"--{name.replace('_', '-')} must contain finite values")
+    if args.seed < 0:
+        parser.error("--seed must be non-negative")
     args.w1_urdf = require_robot_urdf(args.w1_urdf, parser)
     args.marvin_urdf = require_robot_urdf(args.marvin_urdf, parser)
     if args.target_rpy is None:
@@ -322,11 +346,10 @@ def main() -> None:
     if robustness is not None:
         report["circle_perturbation_robustness"] = robustness
     report["relative_marvin_over_w1"] = _relative_summary(report)
-    text = json.dumps(report, indent=2)
+    text = json.dumps(report, indent=2, allow_nan=False)
     print(text)
     if args.report is not None:
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(text + "\n", encoding="utf-8")
+        atomic_write_text(args.report, text + "\n")
     if args.viser:
         _visualize(solvers, analyses, trajectories, report, args)
 
@@ -352,15 +375,16 @@ def _analyze(
     normalization_arm_length=None,
     aligned_arm_length=None,
 ) -> AnalysisResult:
-    from workspace_analyzer.visualization import _zero_tree_transforms
-
     lower, upper = solver.joint_limits.T
-    q = lower + unit_q * (upper - lower)
-    poses = _numpy(solver.forward(q))
-    quality = solver.dexterity(q)
-    world_from_base = _zero_tree_transforms(solver.model)[solver.base_link]
+    joint_positions = lower + unit_q * (upper - lower)
+    configuration = solver._configuration_array(joint_positions)
+    poses, jacobian = solver.forward_with_jacobian(configuration)
+    poses = _numpy(poses)
+    quality = _dexterity_from_jacobian(solver, configuration, jacobian, task="position")
+    neutral = solver.model.zero_transforms()
+    world_from_base = neutral[solver.base_link]
     reference_link = _active_reference_link(solver, reference_link_index)
-    reference_world = _zero_tree_transforms(solver.model)[reference_link]
+    reference_world = neutral[reference_link]
     normalization_arm_length = normalization_arm_length or _effective_arm_length(
         solver, reference_link_index
     )
@@ -371,7 +395,7 @@ def _analyze(
     )
     return AnalysisResult(
         points=poses[:, :3, 3],
-        joint_positions=q,
+        joint_positions=joint_positions,
         manipulability=_numpy(quality.manipulability),
         metrics={
             "minimum_singular_value": _numpy(quality.minimum_singular_value),
@@ -380,7 +404,7 @@ def _analyze(
         },
         metadata={
             "robot": solver.model.name,
-            "samples": len(q),
+            "samples": len(joint_positions),
             "mode": "comparison",
             "comparison_frame": "parallel_world_axes_at_structural_link2",
             "world_from_solver_base": world_from_base.tolist(),
@@ -408,7 +432,10 @@ def _robot_report(
         urdf_arm_length if arm_length_override is None else float(arm_length_override)
     )
     coordinate_length = result.metadata.get("aligned_arm_length") or arm_length
-    hull_volume = _convex_hull_volume(canonical_points)
+    hull_convergence = _convex_hull_convergence(canonical_points)
+    hull_volume = hull_convergence["volumes"][-1]
+    maximum_radius = float(np.max(np.linalg.norm(canonical_points, axis=1)))
+    aabb_volume = float(np.prod(xyz_max - xyz_min))
     return {
         "name": solver.model.name,
         "dof": solver.dof,
@@ -423,24 +450,18 @@ def _robot_report(
         ),
         "reference_link": result.metadata["reference_link"],
         "cartesian_coordinate_scale": result.metadata["coordinate_scale"],
-        "maximum_sampled_radius": float(
-            np.max(np.linalg.norm(canonical_points, axis=1))
-        ),
-        "normalized_maximum_sampled_radius": float(
-            np.max(np.linalg.norm(canonical_points, axis=1)) / coordinate_length
-        ),
+        "maximum_sampled_radius": maximum_radius,
+        "normalized_maximum_sampled_radius": maximum_radius / coordinate_length,
         "reference_base_frame_xyz_min": xyz_min.tolist(),
         "reference_base_frame_xyz_max": xyz_max.tolist(),
         "reference_base_frame_xyz_extent": (xyz_max - xyz_min).tolist(),
-        "reference_base_frame_aabb_volume": float(np.prod(xyz_max - xyz_min)),
+        "reference_base_frame_aabb_volume": aabb_volume,
         "reference_base_frame_convex_hull_volume": hull_volume,
-        "normalized_aabb_volume": float(
-            np.prod(xyz_max - xyz_min) / coordinate_length**3
-        ),
+        "normalized_aabb_volume": aabb_volume / coordinate_length**3,
         "normalized_convex_hull_volume": (
             None if hull_volume is None else float(hull_volume / coordinate_length**3)
         ),
-        "convex_hull_convergence": _convex_hull_convergence(canonical_points),
+        "convex_hull_convergence": hull_convergence,
         "metrics": {name: _percentiles(values) for name, values in metrics.items()},
         "normalized_metrics": {
             "manipulability_over_length_cubed": _percentiles(
@@ -484,8 +505,8 @@ def _active_reference_link(solver, reference_link_index):
 
 
 def _occupancy_comparison(point_sets, resolution):
-    all_points = np.concatenate(list(point_sets.values()))
-    lower, upper = all_points.min(0), all_points.max(0)
+    lower = np.minimum.reduce([points.min(0) for points in point_sets.values()])
+    upper = np.maximum.reduce([points.max(0) for points in point_sets.values()])
     cell = np.maximum((upper - lower) / resolution, 1e-12)
     occupied = {}
     for name, points in point_sets.items():
@@ -495,14 +516,15 @@ def _occupancy_comparison(point_sets, resolution):
     first, second = occupied.values()
     voxel_volume = float(np.prod(cell))
     union = first | second
+    intersection = first & second
     return {
         "resolution": resolution,
         "voxel_volume": voxel_volume,
         "occupied_volume": {
             name: len(values) * voxel_volume for name, values in occupied.items()
         },
-        "intersection_volume": len(first & second) * voxel_volume,
-        "overlap_jaccard": len(first & second) / max(len(union), 1),
+        "intersection_volume": len(intersection) * voxel_volume,
+        "overlap_jaccard": len(intersection) / max(len(union), 1),
     }
 
 
@@ -608,7 +630,7 @@ def _shared_circle(
         center = np.asarray(center_override, dtype=float)
     phase = np.linspace(0.0, 2.0 * np.pi, frames)
     poses = np.broadcast_to(np.eye(4), (frames, 4, 4)).copy()
-    poses[:, :3, :3] = _rpy_rotation(target_rpy)
+    poses[:, :3, :3] = _rpy_matrix(np.asarray(target_rpy, dtype=float))[:3, :3]
     poses[:, :3, 3] = center
     poses[:, axes[0], 3] += radius * np.cos(phase)
     poses[:, axes[1], 3] += radius * np.sin(phase)
@@ -625,11 +647,16 @@ def _circle_perturbation_cases(center, radius, target_rpy, args):
             offset = center.copy()
             offset[axis] += sign * delta
             cases.append((f"center_{label}_{suffix}", offset, radius, target_rpy))
-    dr = radius * float(args.robustness_radius_fraction)
+    radius_delta = radius * float(args.robustness_radius_fraction)
     cases.extend(
         [
-            ("radius_minus", center, max(radius - dr, radius * 0.01), target_rpy),
-            ("radius_plus", center, radius + dr, target_rpy),
+            (
+                "radius_minus",
+                center,
+                max(radius - radius_delta, radius * 0.01),
+                target_rpy,
+            ),
+            ("radius_plus", center, radius + radius_delta, target_rpy),
         ]
     )
     if args.orientation_mode != "position-only":
@@ -670,22 +697,24 @@ def _circle_robustness(solvers, analyses, center, args, ik_settings):
     aggregate = {}
     for name, entries in results.items():
 
-        def vals(key):
-            return [float(e[key]) for e in entries if e.get(key) is not None]
+        def metric_values(key):
+            return [
+                float(entry[key]) for entry in entries if entry.get(key) is not None
+            ]
 
-        success = [float(e.get("success_rate", 0.0)) for e in entries]
+        success = [float(entry.get("success_rate", 0.0)) for entry in entries]
         aggregate[name] = {
             "cases": len(entries),
             "cases_with_100_percent_success": sum(v >= 1.0 for v in success),
             "worst_success_rate": min(success) if success else None,
             "maximum_joint_jump_across_cases": max(
-                vals("max_joint_jump"), default=None
+                metric_values("max_joint_jump"), default=None
             ),
             "minimum_singular_value_across_cases": min(
-                vals("minimum_singular_value"), default=None
+                metric_values("minimum_singular_value"), default=None
             ),
             "minimum_joint_limit_margin_across_cases": min(
-                vals("minimum_joint_limit_margin"), default=None
+                metric_values("minimum_joint_limit_margin"), default=None
             ),
             "case_results": entries,
         }
@@ -698,29 +727,6 @@ def _circle_robustness(solvers, analyses, center, args, ik_settings):
         },
         "robots": aggregate,
     }
-
-
-def _rpy_rotation(rpy):
-    roll, pitch, yaw = np.asarray(rpy, dtype=float)
-    cr, sr = np.cos(roll), np.sin(roll)
-    cp, sp = np.cos(pitch), np.sin(pitch)
-    cy, sy = np.cos(yaw), np.sin(yaw)
-    return np.array(
-        [
-            [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
-            [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
-            [-sp, cp * sr, cp * cr],
-        ]
-    )
-
-
-def _first_active_joint_frame(solver):
-    transform = np.eye(4)
-    for joint in solver.chain:
-        transform = transform @ joint.origin
-        if joint.active:
-            return transform
-    raise RuntimeError("solver chain has no active joint")
 
 
 def _canonical_points(result):
@@ -751,42 +757,41 @@ def _local_targets(canonical_targets, analysis):
 def _visualize(solvers, analyses, trajectories, report, args):
     from workspace_analyzer.visualization import ViserWorkspace
 
-    w1 = ViserWorkspace(
-        solvers["dexforce_w1"],
-        port=args.port,
-        label="dexforce_w1",
-        workspace_root="/workspaces/dexforce_w1",
-        gui_label="Dexforce W1",
-        scene_offset=(-1.1, 0.0, 0.0),
-        initial_q=np.zeros(solvers["dexforce_w1"].dof),
-        load_robot_visuals=not args.no_visuals,
-        load_full_robot=True,
-        reference_active_link_index=args.reference_link_index,
-    )
-    marvin = ViserWorkspace(
-        solvers["marvin_m6"],
-        server=w1.server,
-        label="marvin_m6",
-        workspace_root="/workspaces/marvin_m6",
-        gui_label="Marvin M6",
-        scene_offset=(1.1, 0.0, 0.0),
-        initial_q=default_reference_joints(solvers["marvin_m6"]),
-        load_robot_visuals=not args.no_visuals,
-        load_full_robot=True,
-        reference_active_link_index=args.reference_link_index,
-    )
-    for name, viewer in (("dexforce_w1", w1), ("marvin_m6", marvin)):
-        viewer.add_workspace(analyses[name], color_metric="isotropy", visible=False)
-        viewer.add_trajectory(trajectories[name])
-    w1.add_dashboard(_comparison_markdown(report))
-    w1.frame_view((marvin,))
-    if args.autoplay:
-        w1.play_trajectory()
-        marvin.play_trajectory()
-    try:
+    with (
+        ViserWorkspace(
+            solvers["dexforce_w1"],
+            port=args.port,
+            label="dexforce_w1",
+            workspace_root="/workspaces/dexforce_w1",
+            gui_label="Dexforce W1",
+            scene_offset=(-1.1, 0.0, 0.0),
+            initial_q=np.zeros(solvers["dexforce_w1"].dof),
+            load_robot_visuals=not args.no_visuals,
+            load_full_robot=True,
+            reference_active_link_index=args.reference_link_index,
+        ) as w1,
+        ViserWorkspace(
+            solvers["marvin_m6"],
+            server=w1.server,
+            label="marvin_m6",
+            workspace_root="/workspaces/marvin_m6",
+            gui_label="Marvin M6",
+            scene_offset=(1.1, 0.0, 0.0),
+            initial_q=default_reference_joints(solvers["marvin_m6"]),
+            load_robot_visuals=not args.no_visuals,
+            load_full_robot=True,
+            reference_active_link_index=args.reference_link_index,
+        ) as marvin,
+    ):
+        for name, viewer in (("dexforce_w1", w1), ("marvin_m6", marvin)):
+            viewer.add_workspace(analyses[name], color_metric="isotropy", visible=False)
+            viewer.add_trajectory(trajectories[name])
+        w1.add_dashboard(_comparison_markdown(report))
+        w1.frame_view((marvin,))
+        if args.autoplay:
+            w1.play_trajectory()
+            marvin.play_trajectory()
         w1.wait()
-    finally:
-        marvin.close()
 
 
 def _comparison_markdown(report):
@@ -809,15 +814,14 @@ def _comparison_markdown(report):
     ]["median"]
     scale_label = "link2 equal-length virtual" if aligned else "original physical"
     interpretation = (
-        "After link2 length alignment, W1 has slightly greater workspace envelope, "
-        "normalized manipulability, isotropy, and fixed-orientation reachability; "
-        "Marvin's principal advantage is longer physical reach."
+        "Workspace coordinates are scaled to one nominal arm length. "
+        "Use the physical arm lengths alongside these virtual workspace measures."
         if aligned
-        else "At original scale, Marvin emphasizes absolute workspace and aggregate "
-        "manipulability; W1 has more directionally balanced median dexterity."
+        else "Workspace coordinates retain each URDF's physical scale. "
+        "Length-normalized metrics allow a separate comparison of geometry."
     )
     return (
-        "## W1 versus Marvin M6 conclusions\n"
+        "## W1 versus Marvin M6 comparison\n"
         "| Metric | Dexforce W1 | Marvin M6 |\n"
         "|---|---:|---:|\n"
         "| Convex-hull volume | "
@@ -992,7 +996,10 @@ def _convex_hull_convergence(points):
     counts = [
         min(len(points), max(4, int(round(len(points) * value)))) for value in fractions
     ]
-    volumes = [_convex_hull_volume(points[:count]) for count in counts]
+    volumes_by_count = {
+        count: _convex_hull_volume(points[:count]) for count in dict.fromkeys(counts)
+    }
+    volumes = [volumes_by_count[count] for count in counts]
     final = volumes[-1]
     return {
         "sample_counts": counts,
@@ -1020,46 +1027,49 @@ def _relative_summary(report):
     w1 = report["robots"]["dexforce_w1"]
     marvin = report["robots"]["marvin_m6"]
 
-    def ratio(key):
-        return marvin[key] / w1[key]
+    def ratio(numerator, denominator):
+        if numerator is None or denominator in (None, 0):
+            return None
+        return numerator / denominator
 
     return {
-        "aabb_volume_ratio": ratio("reference_base_frame_aabb_volume"),
-        "convex_hull_volume_ratio": (
-            None
-            if w1["reference_base_frame_convex_hull_volume"] is None
-            else ratio("reference_base_frame_convex_hull_volume")
+        "aabb_volume_ratio": ratio(
+            marvin["reference_base_frame_aabb_volume"],
+            w1["reference_base_frame_aabb_volume"],
         ),
-        "urdf_effective_arm_length_ratio": ratio("urdf_effective_arm_length"),
-        "normalization_arm_length_ratio": ratio("normalization_arm_length"),
-        "normalized_convex_hull_volume_ratio": ratio("normalized_convex_hull_volume"),
-        "manipulability_median_ratio": (
-            marvin["metrics"]["manipulability"]["median"]
-            / w1["metrics"]["manipulability"]["median"]
+        "convex_hull_volume_ratio": ratio(
+            marvin["reference_base_frame_convex_hull_volume"],
+            w1["reference_base_frame_convex_hull_volume"],
         ),
-        "normalized_manipulability_median_ratio": (
-            marvin["normalized_metrics"]["manipulability_over_length_cubed"]["median"]
-            / w1["normalized_metrics"]["manipulability_over_length_cubed"]["median"]
+        "urdf_effective_arm_length_ratio": ratio(
+            marvin["urdf_effective_arm_length"], w1["urdf_effective_arm_length"]
         ),
-        "minimum_singular_value_median_ratio": (
-            marvin["metrics"]["minimum_singular_value"]["median"]
-            / w1["metrics"]["minimum_singular_value"]["median"]
+        "normalization_arm_length_ratio": ratio(
+            marvin["normalization_arm_length"], w1["normalization_arm_length"]
         ),
-        "isotropy_median_ratio": (
-            marvin["metrics"]["isotropy"]["median"]
-            / w1["metrics"]["isotropy"]["median"]
+        "normalized_convex_hull_volume_ratio": ratio(
+            marvin["normalized_convex_hull_volume"], w1["normalized_convex_hull_volume"]
+        ),
+        "manipulability_median_ratio": ratio(
+            marvin["metrics"]["manipulability"]["median"],
+            w1["metrics"]["manipulability"]["median"],
+        ),
+        "normalized_manipulability_median_ratio": ratio(
+            marvin["normalized_metrics"]["manipulability_over_length_cubed"]["median"],
+            w1["normalized_metrics"]["manipulability_over_length_cubed"]["median"],
+        ),
+        "minimum_singular_value_median_ratio": ratio(
+            marvin["metrics"]["minimum_singular_value"]["median"],
+            w1["metrics"]["minimum_singular_value"]["median"],
+        ),
+        "isotropy_median_ratio": ratio(
+            marvin["metrics"]["isotropy"]["median"], w1["metrics"]["isotropy"]["median"]
         ),
         "shared_target_success_rate_difference": (
             report["shared_position_targets"]["marvin_m6"]["success_rate"]
             - report["shared_position_targets"]["dexforce_w1"]["success_rate"]
         ),
     }
-
-
-def _numpy(value):
-    return (
-        value.detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value)
-    )
 
 
 if __name__ == "__main__":

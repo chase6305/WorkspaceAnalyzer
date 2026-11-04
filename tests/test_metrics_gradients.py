@@ -1,5 +1,6 @@
 """Value and derivative regressions for differentiable Torch dexterity metrics."""
 
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,58 @@ def _solver(dtype="float64", backend="torch"):
     if backend == "torch":
         pytest.importorskip("torch")
     return create_solver(FIXTURE, backend=backend, device="cpu", dtype=dtype)
+
+
+@pytest.mark.parametrize("backend", ["numpy", "torch"])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("container", ["array", "list"])
+@pytest.mark.parametrize("imaginary", [0, 0.5])
+def test_complex_weights_fail_before_jacobian(
+    backend, dtype, container, imaginary, monkeypatch
+):
+    solver = _solver(dtype, backend)
+    weights = np.array([1 + imaginary * 1j, 1, 1])
+    if container == "list":
+        weights = weights.tolist()
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("invalid weights must be rejected before Jacobian computation")
+
+    monkeypatch.setattr(solver, "_jacobian_batch", unexpected)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(ValueError, match="weights.*real values"):
+            solver.dexterity([0, 0, 0], weights=weights)
+
+
+@pytest.mark.parametrize("backend", ["numpy", "torch"])
+@pytest.mark.parametrize("dtype", ["complex64", "complex128"])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("imaginary", [0, 0.5])
+def test_complex_tensor_weights_fail_without_device_transfer(
+    backend, dtype, device, imaginary, monkeypatch
+):
+    torch = pytest.importorskip("torch")
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA device is unavailable")
+    solver = _solver("float32" if dtype == "complex64" else "float64", backend)
+    weights = torch.tensor(
+        [1 + imaginary * 1j, 1, 1],
+        dtype=getattr(torch, dtype),
+        device=device,
+        requires_grad=True,
+    )
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("complex rejection must only inspect dtype metadata")
+
+    monkeypatch.setattr(solver, "_jacobian_batch", unexpected)
+    monkeypatch.setattr(torch.Tensor, "cpu", unexpected)
+    monkeypatch.setattr(torch.Tensor, "numpy", unexpected)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(ValueError, match="weights.*real values"):
+            solver.dexterity([0, 0, 0], weights=weights)
 
 
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
@@ -130,3 +183,35 @@ def test_weight_precision_failure_precedes_jacobian(backend, weights, monkeypatc
     with np.errstate(over="raise", invalid="raise"):
         with pytest.raises(ValueError, match="weights"):
             solver.dexterity([0, 0, 0], weights=weights)
+
+
+@pytest.mark.parametrize("backend", ["numpy", "torch"])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_mixed_joint_margin_ignores_continuous_turns_and_clips_stops(backend, dtype):
+    from workspace_analyzer.metrics import (
+        _joint_limit_margin_numpy,
+        _joint_limit_margin_torch,
+    )
+
+    if backend == "torch":
+        pytest.importorskip("torch")
+    solver = create_solver(
+        FIXTURE.with_name("mixed_chain.urdf"),
+        backend=backend,
+        device="cpu",
+        dtype=dtype,
+    )
+    configurations = solver._array(
+        [[0.1, 0.2, 100 * np.pi], [1.8, 0.1, -100 * np.pi], [3.0, 0.1, 0.0]]
+    )
+    if backend == "torch":
+        configurations.requires_grad_()
+        values = _joint_limit_margin_torch(solver, configurations)
+        values.sum().backward()
+        np.testing.assert_allclose(
+            configurations.grad.numpy(), [[0, -2, 0], [-0.5, 0, 0], [0, 0, 0]]
+        )
+        values = values.detach().numpy()
+    else:
+        values = _joint_limit_margin_numpy(solver, configurations)
+    np.testing.assert_allclose(values, [0.6, 0.1, 0.0], rtol=1e-6)

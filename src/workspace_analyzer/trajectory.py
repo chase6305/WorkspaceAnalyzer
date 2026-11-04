@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ._arrays import as_numpy as _numpy
 from ._cancellation import check_cancelled
 from ._validation import require_integer
 
@@ -40,7 +41,11 @@ class TrajectoryIKResult:
         return float(np.max(finite, initial=0.0))
 
     def summary(self) -> dict[str, float | int | None]:
-        """Return JSON-friendly continuity and dexterity diagnostics."""
+        """Return continuity diagnostics in joint coordinates (radians or metres).
+
+        Absolute path and velocity norms mix units on a mixed-joint chain.
+        Normalized jumps and closure errors divide each joint by its range.
+        """
 
         def finite_min(values):
             values = values[np.isfinite(values)]
@@ -85,7 +90,7 @@ def solve_trajectory(
 ) -> TrajectoryIKResult:
     """Solve an ordered path with previous-solution warm starts and diagnostics."""
     check_cancelled(cancel_event)
-    targets = np.asarray(_numpy(target_poses), dtype=float)
+    targets = np.array(_numpy(target_poses), dtype=float, copy=True)
     if targets.ndim != 3 or targets.shape[1:] != (4, 4) or len(targets) == 0:
         raise ValueError("target_poses must have shape (N, 4, 4) with N > 0")
     require_integer(failure_restarts, "failure_restarts", minimum=1)
@@ -117,7 +122,7 @@ def solve_trajectory(
     current = (
         solver.joint_limits.mean(axis=1)
         if seed is None
-        else np.asarray(seed, dtype=float)
+        else np.asarray(_numpy(seed), dtype=float)
     )
     if current.shape != (solver.dof,):
         raise ValueError(f"seed must have shape ({solver.dof},)")
@@ -239,11 +244,16 @@ def solve_trajectory(
     )
 
 
-def _joint_distance(solver, q, reference):
+def _joint_delta(solver, q, reference):
     delta = np.asarray(q) - np.asarray(reference)
     for index, joint in enumerate(solver.active_joints):
         if joint.kind == "continuous":
             delta[index] = (delta[index] + np.pi) % (2 * np.pi) - np.pi
+    return delta
+
+
+def _joint_distance(solver, q, reference):
+    delta = _joint_delta(solver, q, reference)
     ranges = np.maximum(solver.joint_limits[:, 1] - solver.joint_limits[:, 0], 1e-12)
     return float(np.linalg.norm(delta / ranges))
 
@@ -267,10 +277,7 @@ def _refine_closed_loop(
         or not np.allclose(targets[0], targets[-1], atol=1e-8, rtol=0.0)
     ):
         return positions, success, residual
-    closure = positions[0] - positions[-1]
-    for index, joint in enumerate(solver.active_joints):
-        if joint.kind == "continuous":
-            closure[index] = (closure[index] + np.pi) % (2 * np.pi) - np.pi
+    closure = _joint_delta(solver, positions[0], positions[-1])
     refined = np.empty_like(positions)
     refined_residual = np.empty_like(residual)
     for start in range(0, len(targets), batch_size):
@@ -301,11 +308,7 @@ def _refine_closed_loop(
 
 
 def _joint_max_delta(solver, q, reference):
-    delta = np.asarray(q) - np.asarray(reference)
-    for index, joint in enumerate(solver.active_joints):
-        if joint.kind == "continuous":
-            delta[index] = (delta[index] + np.pi) % (2 * np.pi) - np.pi
-    return float(np.max(np.abs(delta)))
+    return float(np.max(np.abs(_joint_delta(solver, q, reference))))
 
 
 def _finite_abs_max(values):
@@ -342,9 +345,3 @@ def _unwrap_continuous(solver, positions, success=None):
             # the successful path. Invalid adjacent segments are masked later.
             result[valid, index] = np.unwrap(result[valid, index])
     return result
-
-
-def _numpy(value):
-    return (
-        value.detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value)
-    )

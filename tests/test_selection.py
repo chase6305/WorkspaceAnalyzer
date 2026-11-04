@@ -396,6 +396,20 @@ def test_batched_selection_matches_independent_scalar_ranking(objective):
             np.testing.assert_array_equal(selected.metrics[name][row], values[row])
 
 
+def test_candidate_validation_ignores_nonfinite_joints_for_failed_ik():
+    study = _stage_study()
+    for result in study.results:
+        result.joint_positions[~result.reachable] = np.nan
+    selected = study.select_solutions()
+    np.testing.assert_array_equal(
+        selected.reachable,
+        np.any([result.reachable for result in study.results], axis=0),
+    )
+    assert np.isfinite(selected.joint_positions[selected.reachable]).all()
+    report = study.summarize_diversity()
+    assert report["summary"]["targets_without_ik"] == 1
+
+
 def test_candidate_validation_avoids_reports_but_rejects_stale_gates(monkeypatch):
     import workspace_analyzer.reachability as module
 

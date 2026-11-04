@@ -9,6 +9,9 @@ from pathlib import Path
 import numpy as np
 
 from workspace_analyzer import AnalysisResult, create_solver
+from workspace_analyzer._arrays import as_numpy as _numpy
+from workspace_analyzer._atomic import atomic_write_text
+from workspace_analyzer._output_paths import validate_output_paths
 from workspace_analyzer.presets import (
     default_reference_joints,
     default_robot_urdf,
@@ -18,7 +21,7 @@ from workspace_analyzer.presets import (
 DEFAULT_URDF = default_robot_urdf()
 
 
-def main() -> None:
+def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--urdf", type=Path, default=DEFAULT_URDF)
     parser.add_argument("--arm", choices=("left", "right"), default="left")
@@ -43,10 +46,29 @@ def main() -> None:
     parser.add_argument("--report", type=Path)
     parser.add_argument("--viser", action="store_true")
     parser.add_argument("--port", type=int, default=8080)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    try:
+        return _run(args, parser)
+    except (ValueError, OSError, ImportError, RuntimeError) as exc:
+        parser.error(str(exc))
+
+
+def _run(args, parser):
+    args.output, args.report, _ = validate_output_paths(
+        output=args.output, report=args.report, inputs=(args.urdf,)
+    )
     args.urdf = require_robot_urdf(args.urdf, parser)
-    if args.samples <= 0 or args.trajectory_frames < 2 or args.dt <= 0:
-        parser.error("samples and dt must be positive; trajectory-frames must be >= 2")
+    if (
+        args.samples <= 0
+        or args.trajectory_frames < 2
+        or not np.isfinite(args.dt)
+        or args.dt <= 0
+        or args.seed < 0
+    ):
+        parser.error(
+            "samples and finite dt must be positive; "
+            "trajectory-frames must be >= 2; seed must be non-negative"
+        )
 
     solver = create_solver(
         str(args.urdf),
@@ -101,33 +123,26 @@ def main() -> None:
         },
         "trajectory": trajectory.summary(),
     }
-    text = json.dumps(report, indent=2)
+    text = json.dumps(report, indent=2, allow_nan=False)
     print(text)
     if args.output is not None:
         result.save(args.output)
     if args.report is not None:
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(text + "\n", encoding="utf-8")
+        atomic_write_text(args.report, text + "\n")
     if args.viser:
         from workspace_analyzer.visualization import ViserWorkspace
 
-        viewer = ViserWorkspace(
+        with ViserWorkspace(
             solver, port=args.port, initial_q=path[0], load_full_robot=True
-        )
-        viewer.add_workspace(result, color_metric=args.color_metric)
-        viewer.add_trajectory(trajectory)
-        viewer.wait()
+        ) as viewer:
+            viewer.add_workspace(result, color_metric=args.color_metric)
+            viewer.add_trajectory(trajectory)
+            viewer.wait()
 
 
 def _percentiles(values) -> dict[str, float]:
     p05, median, p95 = np.percentile(values, (5, 50, 95))
     return {"p05": float(p05), "median": float(median), "p95": float(p95)}
-
-
-def _numpy(value):
-    return (
-        value.detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value)
-    )
 
 
 if __name__ == "__main__":

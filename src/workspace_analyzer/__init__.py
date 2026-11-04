@@ -2,6 +2,7 @@
 
 __version__ = "0.1.0"
 
+from .acceptance import AcceptanceConfig, apply_acceptance, reassess_acceptance
 from .analyzer import (
     AnalysisCancelled,
     AnalysisResult,
@@ -16,6 +17,7 @@ from .diversity import IKDiversityConfig, make_ik_seed_trials, summarize_ik_dive
 from .kinematics import IKResult, KinematicsSolver, SolverConfig, create_solver
 from .metrics import DexterityResult, dexterity_metrics
 from .model import Joint, JointLimit, RobotModel
+from .plane import PlaneConfig, analyze_plane
 from .reachability import ReachabilityConfig, reassess_quality
 from .robustness import PosePerturbations
 from .sampling import SamplingConfig, SamplingStrategy
@@ -25,6 +27,7 @@ from .trajectory import TrajectoryIKResult, solve_trajectory
 
 __all__ = [
     "__version__",
+    "AcceptanceConfig",
     "AnalysisResult",
     "AnalysisCancelled",
     "BoundaryConfig",
@@ -37,6 +40,7 @@ __all__ = [
     "IKStabilityResult",
     "OrientationCoverage",
     "PosePerturbations",
+    "PlaneConfig",
     "Joint",
     "JointLimit",
     "KinematicsSolver",
@@ -51,9 +55,12 @@ __all__ = [
     "TrajectoryIKResult",
     "create_solver",
     "analysis_cache_key",
+    "analyze_plane",
+    "apply_acceptance",
     "dexterity_metrics",
     "solve_trajectory",
     "reassess_quality",
+    "reassess_acceptance",
     "summarize_orientation_coverage",
     "refine_translation_boundary",
     "analyze_ik_stability",

@@ -140,6 +140,25 @@ def test_initial_bracket_within_tolerance_needs_only_endpoint_checks():
     assert result.to_dict()["summary"]["target_evaluations"] == 3
 
 
+@pytest.mark.parametrize("scale", [1e-200, 1e200])
+def test_boundary_distances_preserve_finite_extreme_scales(scale):
+    from workspace_analyzer.boundary import _distance
+
+    with np.errstate(over="raise", under="raise"):
+        distance = _distance([[3 * scale, 4 * scale, 0]], [[0, 0, 0]])
+    np.testing.assert_allclose(distance, [5 * scale], rtol=1e-15, atol=0)
+
+
+def test_nonzero_segment_survives_squared_length_underflow():
+    result = refine_translation_boundary(
+        _solver(), np.eye(4), [1e-200, 0, 0], reachability=_settings()
+    )
+    assert result.statuses.tolist() == ["end_succeeded"]
+    np.testing.assert_allclose(
+        result.to_dict()["segments"][0]["width_m"], 1e-200, rtol=1e-15, atol=0
+    )
+
+
 def test_float32_precision_limit_terminates_without_repeating_same_target():
     result = refine_translation_boundary(
         _solver(dtype="float32"),
@@ -257,3 +276,30 @@ def test_invalid_boundary_settings(settings):
 def test_invalid_segment_inputs(poses, ends):
     with pytest.raises(ValueError):
         refine_translation_boundary(_solver(), poses, ends)
+
+
+def test_trace_write_failure_preserves_previous_archive(tmp_path, monkeypatch):
+    result = refine_translation_boundary(
+        _solver(), np.eye(4), [2, 0, 0], reachability=_settings()
+    )
+    result.save(tmp_path)
+    path = tmp_path / "trace.npz"
+    original = path.read_bytes()
+    writer = np.savez_compressed
+
+    def interrupted(file, **arrays):
+        if "format_version" in arrays:
+            return writer(file, **arrays)
+        if hasattr(file, "write"):
+            file.write(b"partial boundary trace")
+        else:
+            Path(file).write_bytes(b"partial boundary trace")
+        raise OSError("disk full while saving trace")
+
+    monkeypatch.setattr(np, "savez_compressed", interrupted)
+    with pytest.raises(OSError, match="disk full"):
+        result.save(tmp_path)
+    assert path.read_bytes() == original
+    with np.load(path, allow_pickle=False) as archive:
+        np.testing.assert_array_equal(archive["segment_ids"], result.segment_ids)
+    assert not list(tmp_path.glob(".*.tmp"))

@@ -1,0 +1,27 @@
+<robot name="mixed_chain">
+  <link name="base"/><link name="mount"/><link name="arm"/>
+  <link name="slide"/><link name="wrist"/><link name="tcp"/>
+  <joint name="mount" type="fixed">
+    <parent link="base"/><child link="mount"/>
+    <origin xyz="0.2 -0.3 0.4" rpy="0.3 -0.4 0.2"/>
+  </joint>
+  <joint name="bend" type="revolute">
+    <parent link="mount"/><child link="arm"/>
+    <origin xyz="0.1 0.2 0.3" rpy="-0.2 0.3 0.4"/>
+    <axis xyz="1 2 -1"/><limit lower="-2" upper="2"/>
+  </joint>
+  <joint name="slide" type="prismatic">
+    <parent link="arm"/><child link="slide"/>
+    <origin xyz="0.5 0.1 -0.2" rpy="0.4 0.1 -0.3"/>
+    <axis xyz="1 -1 2"/><limit lower="-0.5" upper="0.5"/>
+  </joint>
+  <joint name="spin" type="continuous">
+    <parent link="slide"/><child link="wrist"/>
+    <origin xyz="0.2 -0.1 0.3" rpy="-0.3 0.2 0.1"/>
+    <axis xyz="-2 1 1"/>
+  </joint>
+  <joint name="tool" type="fixed">
+    <parent link="wrist"/><child link="tcp"/>
+    <origin xyz="0.3 0.2 -0.1" rpy="0.2 -0.1 0.3"/>
+  </joint>
+</robot>

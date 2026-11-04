@@ -257,3 +257,30 @@ def test_invalid_boundary_settings(settings):
 def test_invalid_segment_inputs(poses, ends):
     with pytest.raises(ValueError):
         refine_translation_boundary(_solver(), poses, ends)
+
+
+def test_trace_write_failure_preserves_previous_archive(tmp_path, monkeypatch):
+    result = refine_translation_boundary(
+        _solver(), np.eye(4), [2, 0, 0], reachability=_settings()
+    )
+    result.save(tmp_path)
+    path = tmp_path / "trace.npz"
+    original = path.read_bytes()
+    writer = np.savez_compressed
+
+    def interrupted(file, **arrays):
+        if "format_version" in arrays:
+            return writer(file, **arrays)
+        if hasattr(file, "write"):
+            file.write(b"partial boundary trace")
+        else:
+            Path(file).write_bytes(b"partial boundary trace")
+        raise OSError("disk full while saving trace")
+
+    monkeypatch.setattr(np, "savez_compressed", interrupted)
+    with pytest.raises(OSError, match="disk full"):
+        result.save(tmp_path)
+    assert path.read_bytes() == original
+    with np.load(path, allow_pickle=False) as archive:
+        np.testing.assert_array_equal(archive["segment_ids"], result.segment_ids)
+    assert not list(tmp_path.glob(".*.tmp"))

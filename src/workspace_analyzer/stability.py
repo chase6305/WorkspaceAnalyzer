@@ -10,9 +10,11 @@ from zipfile import BadZipFile
 
 import numpy as np
 
+from ._arrays import as_numpy as _numpy
+from ._atomic import atomic_open, atomic_write_text
 from ._cancellation import check_cancelled
 from ._validation import require_integer
-from .analyzer import AnalysisResult, _numpy
+from .analyzer import AnalysisResult
 from .cache import _model_digest, _normalize
 from .kinematics import KinematicsSolver
 from .reachability import (
@@ -284,22 +286,20 @@ class IKStabilityResult:
         )
 
     def save(self, directory: str | Path) -> None:
-        report = self.to_dict()
+        report = json.dumps(self.to_dict(), indent=2, allow_nan=False) + "\n"
         directory = Path(directory)
-        directory.mkdir(parents=True, exist_ok=True)
         for index, result in enumerate(self.results):
             result.save(directory / f"trial_{index:03d}.npz")
-        np.savez_compressed(
-            directory / "initial_seeds.npz",
-            **{
-                f"trial_{index:03d}": seed
-                for index, seed in enumerate(self.initial_seeds or ())
-                if seed is not None
-            },
-        )
-        (directory / "report.json").write_text(
-            json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8"
-        )
+        with atomic_open(directory / "initial_seeds.npz") as stream:
+            np.savez_compressed(
+                stream,
+                **{
+                    f"trial_{index:03d}": seed
+                    for index, seed in enumerate(self.initial_seeds or ())
+                    if seed is not None
+                },
+            )
+        atomic_write_text(directory / "report.json", report)
 
     @classmethod
     def load(cls, directory: str | Path):

@@ -114,7 +114,7 @@ def summarize_ik_diversity(study, config=None, *, joint_kinds=None, cancel_event
     for index, result in enumerate(study.results):
         check_cancelled(cancel_event)
         remaining = ik[index].copy()
-        remaining_count = int(remaining.sum())
+        success_count = remaining_count = int(remaining.sum())
         for prior in representative_trials:
             check_cancelled(cancel_event)
             if remaining_count == 0:
@@ -156,11 +156,9 @@ def summarize_ik_diversity(study, config=None, *, joint_kinds=None, cancel_event
             {
                 "trial_index": index,
                 "name": study.names[index],
-                "ik_success_count": int(ik[index].sum()),
+                "ik_success_count": success_count,
                 "new_configuration_count": remaining_count,
-                "duplicate_candidate_count": int(
-                    np.count_nonzero(ik[index] & ~remaining)
-                ),
+                "duplicate_candidate_count": success_count - remaining_count,
                 "new_quality_configuration_count": int(new_quality.sum()),
                 "cumulative_configuration_count": int(unique.sum()),
             }

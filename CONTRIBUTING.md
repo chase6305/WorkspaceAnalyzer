@@ -28,11 +28,13 @@ trajectories, dexterity, and W1/Marvin comparisons. Synthetic fixtures and inter
 benchmarks support algorithm regression; avoid expanding them into additional
 user-facing demos. See [the example guide](examples/README.md).
 
-Run `make test-robot` for Marvin left/right Jacobians, the 90° elbow reference,
+Run `make test-robot` for Marvin left/right spatial Jacobians in both precisions,
+the 90° elbow reference,
 mesh loading, and all four Cartesian trajectory shapes. Unlike the general suite,
 this target fails when Marvin assets are missing. Set `HUMANOID_ASSETS` when the
 asset checkout is not adjacent to this repository. These are URDF-based numerical
 checks, not physical hardware or collision-clearance validation.
+Torch CPU and CUDA Jacobian cases run when those optional runtimes are available.
 
 `make check` runs lint/format checks, pytest, the analytic robot workflow, and
 package builds. Use `make test`, `make test-workflow`, `make lint`, or `make build`
@@ -41,7 +43,8 @@ writes JSON/Markdown reports and NPZ diagnostics under `outputs/test-workflow`.
 Workflow acceptance failures return a nonzero exit status while retaining results.
 See [the testing workflow](docs/testing-workflow.md) for robot-specific runs.
 
-CI keeps a NumPy-only runtime matrix on Python 3.10/3.12 and a separate Python 3.12
+CI keeps a NumPy-only runtime matrix on Python 3.10/3.12, including the NumPy 1.24.0
+lower bound on Python 3.10, and a separate Python 3.12
 job with Torch CPU, SciPy, Viser, and trimesh. The latter verifies imports and local
 socket support before running tests. Both jobs retain JUnit and robot reports.
 To prepare the optional CPU profile locally, use the CPU distribution described
@@ -58,6 +61,10 @@ CI job is responsible for actually running them. CUDA checks require an environm
 with a suitable device and are not covered by the CPU job.
 
 ## Design expectations
+
+The [architecture guide](docs/architecture.md) describes module responsibilities
+and the shared geometry, metrics, and export paths. Prefer reusing these paths
+over adding parallel implementations in examples or viewers.
 
 - Keep the core importable with NumPy alone; optional features must fail with actionable installation messages.
 - Keep NumPy and Torch behavior consistent, including input shapes and result semantics.

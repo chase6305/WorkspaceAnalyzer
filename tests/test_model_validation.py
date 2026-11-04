@@ -102,3 +102,42 @@ def test_finite_axes_normalize_without_overflow_or_underflow(tmp_path, scale):
     np.testing.assert_allclose(rotation @ rotation.T, np.eye(3), atol=1e-12)
     np.testing.assert_allclose(rotation @ axis, axis, atol=1e-12)
     assert np.trace(rotation) == pytest.approx(1 + 2 * np.cos(0.5))
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    ["two_link.urdf", "mixed_chain.urdf", "cartesian_stage.urdf", "continuous.urdf"],
+)
+def test_zero_tree_transforms_match_chain_fk(fixture):
+    from workspace_analyzer import KinematicsSolver, SolverConfig
+
+    model = RobotModel.from_urdf(Path(__file__).parent / "fixtures" / fixture)
+    solver = KinematicsSolver(model, config=SolverConfig(backend="numpy"))
+    neutral = model.zero_transforms()
+    assert set(neutral) == set(model.links)
+    for link, transform in solver.forward(np.zeros(solver.dof), all_links=True).items():
+        np.testing.assert_allclose(neutral[link], transform, atol=1e-12)
+    neutral[solver.tip_link][:] = 0
+    assert np.linalg.det(model.zero_transforms()[solver.tip_link]) == pytest.approx(1)
+
+
+def test_zero_tree_transforms_include_branches_and_disconnected_roots(tmp_path):
+    model = RobotModel.from_urdf(
+        _write_urdf(
+            tmp_path,
+            '<link name="root"/><link name="arm"/><link name="tool"/>'
+            '<link name="sensor"/><link name="detached"/>'
+            '<joint name="tool" type="fixed"><parent link="arm"/>'
+            '<child link="tool"/><origin xyz="0 2 0"/></joint>'
+            '<joint name="sensor" type="fixed"><parent link="root"/>'
+            '<child link="sensor"/><origin xyz="0 0 3"/></joint>'
+            '<joint name="arm" type="prismatic"><parent link="root"/>'
+            '<child link="arm"/><origin xyz="1 0 0"/>'
+            '<limit lower="1" upper="2"/></joint>',
+        )
+    )
+    poses = model.zero_transforms()
+    assert set(poses) == set(model.links)
+    np.testing.assert_allclose(poses["tool"][:3, 3], [1, 2, 0])
+    np.testing.assert_allclose(poses["sensor"][:3, 3], [0, 0, 3])
+    np.testing.assert_array_equal(poses["detached"], np.eye(4))

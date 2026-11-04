@@ -9,11 +9,11 @@ from workspace_analyzer import AnalysisCancelled, create_solver
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def _solver(backend, **kwargs):
+def _solver(backend, *, fixture="two_link.urdf", **kwargs):
     if backend == "torch":
         pytest.importorskip("torch")
     return create_solver(
-        str(FIXTURES / "two_link.urdf"), backend=backend, device="cpu", **kwargs
+        str(FIXTURES / fixture), backend=backend, device="cpu", **kwargs
     )
 
 
@@ -90,7 +90,8 @@ def test_inverse_cancels_between_iterations_and_during_rescue(
             rescue_restarts=3,
             rescue_rounds=2,
         )
-    assert sizes == ([1, 1, 3] if during_rescue else [1])
+    # The singular initial seed is stationary and retires after its first step.
+    assert sizes == ([1, 3] if during_rescue else [1])
 
 
 def test_pre_cancelled_inverse_and_trajectory_skip_computation(monkeypatch):
@@ -119,6 +120,56 @@ def test_torch_retirement_preserves_autograd():
     result.positions.sum().backward()
     assert torch.isfinite(seed.grad).all()
     torch.testing.assert_close(seed.grad[0], torch.ones(2, dtype=torch.float64))
+
+
+@pytest.mark.parametrize("backend", ["numpy", "torch"])
+@pytest.mark.parametrize("rescue_rounds", [0, 2])
+def test_stationary_candidates_keep_results_and_rescue(
+    backend, rescue_rounds, monkeypatch
+):
+    import workspace_analyzer.kinematics as kinematics
+
+    solver = _solver(
+        backend,
+        fixture="cartesian_stage.urdf",
+        max_iterations=80,
+    )
+    targets = np.tile(np.eye(4), (3, 1, 1))
+    targets[:, :3, 3] = [[0.2, -0.3, 0.4], [2, 0, 0], [0, -3, 0.2]]
+    options = dict(position_only=True, rescue_restarts=2, rescue_rounds=rescue_rounds)
+    optimized = solver.inverse(targets, **options)
+    monkeypatch.setattr(kinematics, "_moving_candidates", lambda *args: None)
+    baseline = solver.inverse(targets, **options)
+    for name in ("positions", "success", "residual"):
+        np.testing.assert_array_equal(
+            _numpy(getattr(optimized, name)), _numpy(getattr(baseline, name))
+        )
+    np.testing.assert_array_equal(_numpy(optimized.success), [True, False, False])
+    assert optimized.iterations < baseline.iterations
+
+
+def test_stationary_torch_value_keeps_unrolled_derivatives(monkeypatch):
+    import workspace_analyzer.kinematics as kinematics
+
+    torch = pytest.importorskip("torch")
+    solver = _solver("torch", max_iterations=5)
+    target = torch.eye(4, dtype=torch.float64)
+    target[:3, 3] = torch.tensor([10, 0, 0], dtype=torch.float64)
+
+    def run():
+        seed = torch.zeros(2, dtype=torch.float64, requires_grad=True)
+        result = solver.inverse(target, seed=seed, position_only=True)
+        result.positions.sum().backward()
+        return result, seed.grad
+
+    actual, gradient = run()
+    monkeypatch.setattr(kinematics, "_moving_candidates", lambda *args: None)
+    expected, expected_gradient = run()
+    assert actual.iterations == expected.iterations == 5
+    torch.testing.assert_close(actual.positions, expected.positions, rtol=0, atol=0)
+    torch.testing.assert_close(gradient, expected_gradient, rtol=0, atol=0)
+    assert torch.isfinite(gradient).all()
+    assert not torch.equal(gradient, torch.ones_like(gradient))
 
 
 @pytest.mark.parametrize("backend", ["numpy", "torch"])
@@ -175,9 +226,17 @@ def test_many_rescue_rounds_do_not_exhaust_the_call_stack():
 
 
 @pytest.mark.parametrize("backend", ["numpy", "torch"])
-def test_rescue_retains_best_seeded_attempt_and_counts_all_iterations(backend):
+@pytest.mark.parametrize("target_shape", ["single", "singleton_batch", "batch"])
+def test_rescue_retains_best_seeded_attempt_and_counts_all_iterations(
+    backend, target_shape
+):
     solver = _solver(backend, max_iterations=1, tolerance=1e-12)
-    targets = solver.forward([[0.3, 0.7], [-0.4, 0.5]])
+    configurations = np.array([[0.3, 0.7], [-0.4, 0.5]])
+    if target_shape == "single":
+        configurations = configurations[0]
+    elif target_shape == "singleton_batch":
+        configurations = configurations[:1]
+    targets = solver.forward(configurations)
     attempts = [solver.inverse(targets, seed=[0, 0], position_only=True)]
     for offset in range(1, 4):
         attempts.append(
@@ -197,12 +256,21 @@ def test_rescue_retains_best_seeded_attempt_and_counts_all_iterations(backend):
         rescue_restarts=3,
         rescue_rounds=3,
     )
-    residuals = np.stack([_numpy(item.residual) for item in attempts])
-    positions = np.stack([_numpy(item.positions) for item in attempts])
+    residuals = np.stack(
+        [np.asarray(_numpy(item.residual)).reshape(-1) for item in attempts]
+    )
+    positions = np.stack(
+        [_numpy(item.positions).reshape(-1, solver.dof) for item in attempts]
+    )
     best = np.argmin(residuals, axis=0)
-    columns = np.arange(2)
-    np.testing.assert_allclose(_numpy(result.residual), residuals[best, columns])
-    np.testing.assert_allclose(_numpy(result.positions), positions[best, columns])
+    columns = np.arange(residuals.shape[1])
+    assert result.positions.shape == configurations.shape
+    np.testing.assert_allclose(
+        np.asarray(_numpy(result.residual)).reshape(-1), residuals[best, columns]
+    )
+    np.testing.assert_allclose(
+        _numpy(result.positions).reshape(-1, solver.dof), positions[best, columns]
+    )
     assert result.iterations == sum(item.iterations for item in attempts)
 
 

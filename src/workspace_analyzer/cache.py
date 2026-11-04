@@ -66,7 +66,7 @@ class ResultCache:
 def analysis_cache_key(solver, mode: str, config) -> str:
     """Fingerprint model content, selected chain, solver, mode, and config."""
     payload = {
-        "schema": 3,
+        "schema": 5,
         "model": _model_digest(solver.model),
         "base_link": solver.base_link,
         "tip_link": solver.tip_link,

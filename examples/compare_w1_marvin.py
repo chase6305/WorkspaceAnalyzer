@@ -9,6 +9,10 @@ from pathlib import Path
 import numpy as np
 
 from workspace_analyzer import AnalysisResult, create_solver
+from workspace_analyzer._arrays import as_numpy as _numpy
+from workspace_analyzer._atomic import atomic_write_text
+from workspace_analyzer._output_paths import validate_output_paths
+from workspace_analyzer.model import _rpy_matrix
 from workspace_analyzer.presets import (
     default_reference_joints,
     default_robot_urdf,
@@ -19,7 +23,7 @@ W1_URDF = default_robot_urdf("w1")
 MARVIN_URDF = default_robot_urdf()
 
 
-def main() -> None:
+def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--w1-urdf", "--robot-a-urdf", dest="w1_urdf", type=Path, default=W1_URDF
@@ -144,7 +148,26 @@ def main() -> None:
     parser.add_argument("--autoplay", action="store_true")
     parser.add_argument("--no-visuals", action="store_true")
     parser.add_argument("--port", type=int, default=8080)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    try:
+        return _run(args, parser)
+    except (ValueError, OSError, ImportError, RuntimeError) as exc:
+        parser.error(str(exc))
+
+
+def _run(args, parser):
+    _, args.report, _ = validate_output_paths(
+        report=args.report, inputs=(args.w1_urdf, args.marvin_urdf)
+    )
+    for name, value in vars(args).items():
+        if isinstance(value, float) and not np.isfinite(value):
+            parser.error(f"--{name.replace('_', '-')} must be finite")
+    for name in ("target_rpy", "circle_center_offset"):
+        value = getattr(args, name)
+        if value is not None and not np.isfinite(value).all():
+            parser.error(f"--{name.replace('_', '-')} must contain finite values")
+    if args.seed < 0:
+        parser.error("--seed must be non-negative")
     args.w1_urdf = require_robot_urdf(args.w1_urdf, parser)
     args.marvin_urdf = require_robot_urdf(args.marvin_urdf, parser)
     if args.target_rpy is None:
@@ -322,11 +345,10 @@ def main() -> None:
     if robustness is not None:
         report["circle_perturbation_robustness"] = robustness
     report["relative_marvin_over_w1"] = _relative_summary(report)
-    text = json.dumps(report, indent=2)
+    text = json.dumps(report, indent=2, allow_nan=False)
     print(text)
     if args.report is not None:
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(text + "\n", encoding="utf-8")
+        atomic_write_text(args.report, text + "\n")
     if args.viser:
         _visualize(solvers, analyses, trajectories, report, args)
 
@@ -352,15 +374,14 @@ def _analyze(
     normalization_arm_length=None,
     aligned_arm_length=None,
 ) -> AnalysisResult:
-    from workspace_analyzer.visualization import _zero_tree_transforms
-
     lower, upper = solver.joint_limits.T
     q = lower + unit_q * (upper - lower)
     poses = _numpy(solver.forward(q))
     quality = solver.dexterity(q)
-    world_from_base = _zero_tree_transforms(solver.model)[solver.base_link]
+    neutral = solver.model.zero_transforms()
+    world_from_base = neutral[solver.base_link]
     reference_link = _active_reference_link(solver, reference_link_index)
-    reference_world = _zero_tree_transforms(solver.model)[reference_link]
+    reference_world = neutral[reference_link]
     normalization_arm_length = normalization_arm_length or _effective_arm_length(
         solver, reference_link_index
     )
@@ -608,7 +629,7 @@ def _shared_circle(
         center = np.asarray(center_override, dtype=float)
     phase = np.linspace(0.0, 2.0 * np.pi, frames)
     poses = np.broadcast_to(np.eye(4), (frames, 4, 4)).copy()
-    poses[:, :3, :3] = _rpy_rotation(target_rpy)
+    poses[:, :3, :3] = _rpy_matrix(np.asarray(target_rpy, dtype=float))[:3, :3]
     poses[:, :3, 3] = center
     poses[:, axes[0], 3] += radius * np.cos(phase)
     poses[:, axes[1], 3] += radius * np.sin(phase)
@@ -700,29 +721,6 @@ def _circle_robustness(solvers, analyses, center, args, ik_settings):
     }
 
 
-def _rpy_rotation(rpy):
-    roll, pitch, yaw = np.asarray(rpy, dtype=float)
-    cr, sr = np.cos(roll), np.sin(roll)
-    cp, sp = np.cos(pitch), np.sin(pitch)
-    cy, sy = np.cos(yaw), np.sin(yaw)
-    return np.array(
-        [
-            [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
-            [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
-            [-sp, cp * sr, cp * cr],
-        ]
-    )
-
-
-def _first_active_joint_frame(solver):
-    transform = np.eye(4)
-    for joint in solver.chain:
-        transform = transform @ joint.origin
-        if joint.active:
-            return transform
-    raise RuntimeError("solver chain has no active joint")
-
-
 def _canonical_points(result):
     world_from_base = np.asarray(result.metadata["world_from_solver_base"])
     reference_world = np.asarray(result.metadata["reference_anchor_world"])
@@ -751,42 +749,41 @@ def _local_targets(canonical_targets, analysis):
 def _visualize(solvers, analyses, trajectories, report, args):
     from workspace_analyzer.visualization import ViserWorkspace
 
-    w1 = ViserWorkspace(
-        solvers["dexforce_w1"],
-        port=args.port,
-        label="dexforce_w1",
-        workspace_root="/workspaces/dexforce_w1",
-        gui_label="Dexforce W1",
-        scene_offset=(-1.1, 0.0, 0.0),
-        initial_q=np.zeros(solvers["dexforce_w1"].dof),
-        load_robot_visuals=not args.no_visuals,
-        load_full_robot=True,
-        reference_active_link_index=args.reference_link_index,
-    )
-    marvin = ViserWorkspace(
-        solvers["marvin_m6"],
-        server=w1.server,
-        label="marvin_m6",
-        workspace_root="/workspaces/marvin_m6",
-        gui_label="Marvin M6",
-        scene_offset=(1.1, 0.0, 0.0),
-        initial_q=default_reference_joints(solvers["marvin_m6"]),
-        load_robot_visuals=not args.no_visuals,
-        load_full_robot=True,
-        reference_active_link_index=args.reference_link_index,
-    )
-    for name, viewer in (("dexforce_w1", w1), ("marvin_m6", marvin)):
-        viewer.add_workspace(analyses[name], color_metric="isotropy", visible=False)
-        viewer.add_trajectory(trajectories[name])
-    w1.add_dashboard(_comparison_markdown(report))
-    w1.frame_view((marvin,))
-    if args.autoplay:
-        w1.play_trajectory()
-        marvin.play_trajectory()
-    try:
+    with (
+        ViserWorkspace(
+            solvers["dexforce_w1"],
+            port=args.port,
+            label="dexforce_w1",
+            workspace_root="/workspaces/dexforce_w1",
+            gui_label="Dexforce W1",
+            scene_offset=(-1.1, 0.0, 0.0),
+            initial_q=np.zeros(solvers["dexforce_w1"].dof),
+            load_robot_visuals=not args.no_visuals,
+            load_full_robot=True,
+            reference_active_link_index=args.reference_link_index,
+        ) as w1,
+        ViserWorkspace(
+            solvers["marvin_m6"],
+            server=w1.server,
+            label="marvin_m6",
+            workspace_root="/workspaces/marvin_m6",
+            gui_label="Marvin M6",
+            scene_offset=(1.1, 0.0, 0.0),
+            initial_q=default_reference_joints(solvers["marvin_m6"]),
+            load_robot_visuals=not args.no_visuals,
+            load_full_robot=True,
+            reference_active_link_index=args.reference_link_index,
+        ) as marvin,
+    ):
+        for name, viewer in (("dexforce_w1", w1), ("marvin_m6", marvin)):
+            viewer.add_workspace(analyses[name], color_metric="isotropy", visible=False)
+            viewer.add_trajectory(trajectories[name])
+        w1.add_dashboard(_comparison_markdown(report))
+        w1.frame_view((marvin,))
+        if args.autoplay:
+            w1.play_trajectory()
+            marvin.play_trajectory()
         w1.wait()
-    finally:
-        marvin.close()
 
 
 def _comparison_markdown(report):
@@ -1054,12 +1051,6 @@ def _relative_summary(report):
             - report["shared_position_targets"]["dexforce_w1"]["success_rate"]
         ),
     }
-
-
-def _numpy(value):
-    return (
-        value.detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value)
-    )
 
 
 if __name__ == "__main__":

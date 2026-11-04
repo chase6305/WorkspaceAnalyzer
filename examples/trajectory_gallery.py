@@ -9,6 +9,9 @@ from pathlib import Path
 import numpy as np
 
 from workspace_analyzer import create_solver
+from workspace_analyzer._arrays import as_numpy as _numpy
+from workspace_analyzer._atomic import atomic_write_text
+from workspace_analyzer._output_paths import validate_output_paths
 from workspace_analyzer.presets import (
     default_reference_joints,
     default_robot_urdf,
@@ -18,7 +21,7 @@ from workspace_analyzer.presets import (
 DEFAULT_URDF = default_robot_urdf()
 
 
-def main() -> None:
+def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--urdf", type=Path, default=DEFAULT_URDF)
     parser.add_argument("--arm", choices=("left", "right"), default="left")
@@ -37,10 +40,26 @@ def main() -> None:
     parser.add_argument("--viser", action="store_true")
     parser.add_argument("--no-visuals", action="store_true")
     parser.add_argument("--port", type=int, default=8080)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    try:
+        return _run(args, parser)
+    except (ValueError, OSError, ImportError, RuntimeError) as exc:
+        parser.error(str(exc))
+
+
+def _run(args, parser):
+    _, args.report, _ = validate_output_paths(report=args.report, inputs=(args.urdf,))
     args.urdf = require_robot_urdf(args.urdf, parser)
-    if args.frames < 2 or args.scale <= 0 or args.depth < 0 or args.dt <= 0:
-        parser.error("frames >= 2, scale > 0, depth >= 0, and dt > 0 are required")
+    if (
+        args.frames < 2
+        or not np.isfinite([args.scale, args.depth, args.dt]).all()
+        or args.scale <= 0
+        or args.depth < 0
+        or args.dt <= 0
+    ):
+        parser.error(
+            "frames >= 2 and finite scale > 0, depth >= 0, dt > 0 are required"
+        )
 
     solver = create_solver(
         str(args.urdf),
@@ -70,30 +89,29 @@ def main() -> None:
         "backend": f"{solver.backend}:{solver.device}",
         **result.summary(),
     }
-    text = json.dumps(report, indent=2)
+    text = json.dumps(report, indent=2, allow_nan=False)
     print(text)
     if args.report is not None:
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(text + "\n", encoding="utf-8")
+        atomic_write_text(args.report, text + "\n")
     if args.viser:
         from workspace_analyzer.visualization import ViserWorkspace
 
-        viewer = ViserWorkspace(
+        with ViserWorkspace(
             solver,
             port=args.port,
             initial_q=reference_q,
             load_robot_visuals=not args.no_visuals,
             load_full_robot=True,
-        )
-        viewer.add_trajectory(result)
-        viewer.add_dashboard(
-            "## Trajectory conclusion\n"
-            f"- Shape: **{args.shape}**\n"
-            f"- IK success: **{result.success_rate:.1%}**\n"
-            f"- Max joint jump: **{result.max_joint_jump:.5f} rad**\n"
-            f"- Velocity violations: **{result.summary()['velocity_violations']}**"
-        )
-        viewer.wait()
+        ) as viewer:
+            viewer.add_trajectory(result)
+            viewer.add_dashboard(
+                "## Trajectory conclusion\n"
+                f"- Shape: **{args.shape}**\n"
+                f"- IK success: **{result.success_rate:.1%}**\n"
+                f"- Max joint jump: **{result.max_joint_jump:.5f} rad**\n"
+                f"- Velocity violations: **{result.summary()['velocity_violations']}**"
+            )
+            viewer.wait()
 
 
 def _canonical_trajectory(shape, frames, scale, depth):
@@ -115,12 +133,6 @@ def _canonical_trajectory(shape, frames, scale, depth):
     poses = np.broadcast_to(np.eye(4), (frames, 4, 4)).copy()
     poses[:, :3, 3] = xyz
     return poses
-
-
-def _numpy(value):
-    return (
-        value.detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value)
-    )
 
 
 if __name__ == "__main__":

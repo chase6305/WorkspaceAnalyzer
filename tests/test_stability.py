@@ -533,3 +533,27 @@ def test_mutated_initial_seed_provenance_is_rejected_before_save(tmp_path, seed)
     with pytest.raises(ValueError, match="initial seed"):
         study.save(tmp_path / "invalid")
     assert not (tmp_path / "invalid").exists()
+
+
+def test_seed_archive_write_failure_preserves_saved_study(tmp_path, monkeypatch):
+    study = analyze_ik_stability(_solver(), [[0.2, 0, 0]], _trials(), _config())
+    study.save(tmp_path)
+    path = tmp_path / "initial_seeds.npz"
+    original = path.read_bytes()
+    writer = np.savez_compressed
+
+    def interrupted(file, **arrays):
+        if "format_version" in arrays:
+            return writer(file, **arrays)
+        if hasattr(file, "write"):
+            file.write(b"partial seed archive")
+        else:
+            Path(file).write_bytes(b"partial seed archive")
+        raise OSError("disk full while saving seeds")
+
+    monkeypatch.setattr(np, "savez_compressed", interrupted)
+    with pytest.raises(OSError, match="disk full"):
+        study.save(tmp_path)
+    assert path.read_bytes() == original
+    assert IKStabilityResult.load(tmp_path).to_dict() == study.to_dict()
+    assert not list(tmp_path.glob(".*.tmp"))

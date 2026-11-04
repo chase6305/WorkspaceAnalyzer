@@ -307,10 +307,10 @@ class KinematicsSolver:
                 self.joint_limits[:, 1],
                 size=((restarts - 1) * n, self.dof),
             )
-            q = _concat_rows(q, self._array(extra), self.backend)
+            q = _concat(q, self._array(extra), self.backend, axis=0)
             goal = _repeat_rows(goal, restarts, self.backend)
         expanded_posture = (
-            _repeat_configuration(posture, restarts, self.backend)
+            _repeat_rows(posture, restarts, self.backend)
             if posture is not None and posture_gain > 0 and restarts > 1
             else posture
         )
@@ -344,26 +344,22 @@ class KinematicsSolver:
             active_q, jac, error = active_q[pending], jac[pending], error[pending]
             if position_only:
                 jac = jac[:, :3]
-            dq = _dls(jac, error, self.config.damping, self.backend)
+            bias = None
             if self.config.joint_centering_gain > 0:
-                dq = dq + self.config.joint_centering_gain * _joint_centering_step(
-                    jac,
+                bias = self.config.joint_centering_gain * _joint_centering_gradient(
                     active_q,
                     limits,
-                    self.config.damping,
-                    self.backend,
                     self._continuous_indices,
                 )
             if posture_gain > 0 and posture is not None:
-                dq = dq + posture_gain * _posture_step(
-                    jac,
+                posture_bias = posture_gain * _posture_gradient(
                     active_q,
                     expanded_posture[active],
                     limits,
-                    self.config.damping,
-                    self.backend,
                     self._continuous_indices,
                 )
+                bias = posture_bias if bias is None else bias + posture_bias
+            dq = _biased_dls(jac, error, self.config.damping, self.backend, bias)
             dq = _clip(
                 dq,
                 -self.config.max_joint_step,
@@ -373,7 +369,14 @@ class KinematicsSolver:
             updated = self._bound_configuration(
                 active_q + self.config.step_size * dq, limits
             )
+            moving = _moving_candidates(active_q, updated, self.backend)
             q = _put_rows(q, active, updated, self.backend)
+            if moving is not None:
+                # An unchanged configuration is a deterministic fixed point for
+                # this attempt. Keep its measured residual and allow rescue.
+                active = active[moving]
+                if len(active) == 0:
+                    break
         else:
             # Only unconverged candidates changed on the last allowed step.
             check_cancelled(cancel_event)
@@ -424,17 +427,15 @@ class KinematicsSolver:
                     cancel_event=cancel_event,
                 )
                 iteration += rescue.iterations
-                rescue_q, rescue_success, rescue_residual = _as_result_batch(
-                    rescue, self.backend
-                )
+                # Slicing base_goal preserves the target batch, including N=1.
                 q, success, residual = _merge_rescue(
                     q,
                     success,
                     residual,
                     failed,
-                    rescue_q,
-                    rescue_success,
-                    rescue_residual,
+                    rescue.positions,
+                    rescue.success,
+                    rescue.residual,
                     self.backend,
                 )
         check_cancelled(cancel_event)
@@ -497,6 +498,16 @@ def create_solver(
         tip_link,
         SolverConfig(backend=backend, device=device, **kwargs),
     )
+
+
+def _moving_candidates(before, after, backend):
+    if backend == "numpy":
+        return np.any(after != before, axis=1)
+    # A value fixed point need not be a derivative fixed point. Preserve the
+    # complete unrolled graph whenever the update participates in autograd.
+    if after.requires_grad:
+        return None
+    return (after != before).any(dim=1)
 
 
 def _motion_numpy(kind, axis, values):
@@ -654,26 +665,19 @@ def _quaternion_rotation_error(rotation, backend):
     return 2 * quaternion[:, 1:] * torch.where(quaternion[:, :1] < 0, -1.0, 1.0)
 
 
-def _concat(a, b, backend):
+def _concat(a, b, backend, *, axis=1):
     if backend == "numpy":
-        return np.concatenate((a, b), axis=1)
+        return np.concatenate((a, b), axis=axis)
     import torch
 
-    return torch.cat((a, b), dim=1)
-
-
-def _concat_rows(a, b, backend):
-    if backend == "numpy":
-        return np.concatenate((a, b), axis=0)
-    import torch
-
-    return torch.cat((a, b), dim=0)
+    return torch.cat((a, b), dim=axis)
 
 
 def _repeat_rows(value, count, backend):
+    repeats = (count,) + (1,) * (value.ndim - 1)
     if backend == "numpy":
-        return np.tile(value, (count, 1, 1))
-    return value.repeat(count, 1, 1)
+        return np.tile(value, repeats)
+    return value.repeat(*repeats)
 
 
 def _select_best(
@@ -742,22 +746,6 @@ def _seed_distance_torch(q, reference, limits, continuous):
     return torch.linalg.vector_norm(delta / ranges, dim=-1)
 
 
-def _as_result_batch(result, backend):
-    if result.positions.ndim == 2:
-        return result.positions, result.success, result.residual
-    if backend == "numpy":
-        return (
-            result.positions[None, :],
-            np.asarray([result.success]),
-            np.asarray([result.residual]),
-        )
-    return (
-        result.positions[None, :],
-        result.success[None],
-        result.residual[None],
-    )
-
-
 def _merge_rescue(
     q,
     success,
@@ -791,47 +779,59 @@ def _norm(x, backend):
 
 
 def _dls(j, e, damping, backend):
-    jt = j.swapaxes(1, 2)
+    # Form the small normal system in float64 so float32 rounding cannot erase
+    # damping at rank-deficient configurations. Preserve the caller's dtype.
+    dtype = j.dtype
     size = j.shape[1]
     if backend == "numpy":
+        j = j.astype(np.float64, copy=False)
+        e = e.astype(np.float64, copy=False)
+        jt = j.swapaxes(1, 2)
         eye = np.eye(size, dtype=j.dtype)[None]
         return (jt @ np.linalg.solve(j @ jt + damping * damping * eye, e[..., None]))[
             ..., 0
-        ]
+        ].astype(dtype, copy=False)
     import torch
 
+    if dtype == torch.float32 and j.device.type in {"cpu", "cuda"}:
+        j, e = j.double(), e.double()
+    jt = j.swapaxes(1, 2)
     eye = torch.eye(size, dtype=j.dtype, device=j.device)[None]
     return (jt @ torch.linalg.solve(j @ jt + damping * damping * eye, e[..., None]))[
         ..., 0
-    ]
+    ].to(dtype)
 
 
-def _joint_centering_step(j, q, limits, damping, backend, continuous=()):
-    """Project a normalized center-seeking gradient into the task null space."""
+def _biased_dls(j, error, damping, backend, bias=None):
+    """Combine task correction and damped posture projection in one solve.
+
+    J# e + (I - J# J) bias = bias + J# (e - J bias).
+    The damped projection only approximately preserves the primary task.
+    """
+    if bias is None:
+        return _dls(j, error, damping, backend)
+    task_bias = (j @ bias[..., None])[..., 0]
+    return bias + _dls(j, error - task_bias, damping, backend)
+
+
+def _joint_centering_gradient(q, limits, continuous=()):
+    """Return the normalized center-seeking joint gradient."""
     center = (limits[:, 0] + limits[:, 1]) * 0.5
     half_range = (limits[:, 1] - limits[:, 0]) * 0.5
     gradient = (center - q) / half_range
     if continuous:
         gradient[..., list(continuous)] = 0.0
-    task_gradient = (j @ gradient[..., None])[..., 0]
-    projected_task = _dls(j, task_gradient, damping, backend)
-    return gradient - projected_task
+    return gradient
 
 
-def _posture_step(j, q, reference, limits, damping, backend, continuous=()):
-    """Project a normalized reference-posture gradient into the task null space."""
+def _posture_gradient(q, reference, limits, continuous=()):
+    """Return the normalized shortest-path reference-posture gradient."""
     ranges = limits[:, 1] - limits[:, 0]
     delta = reference - q
     if continuous:
         indices = list(continuous)
         delta[..., indices] = (delta[..., indices] + np.pi) % (2 * np.pi) - np.pi
-    gradient = delta / ranges
-    task_gradient = (j @ gradient[..., None])[..., 0]
-    return gradient - _dls(j, task_gradient, damping, backend)
-
-
-def _repeat_configuration(value, count, backend):
-    return np.tile(value, (count, 1)) if backend == "numpy" else value.repeat(count, 1)
+    return delta / ranges
 
 
 def _clip(q, lo, hi, backend):

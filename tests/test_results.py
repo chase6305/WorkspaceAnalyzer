@@ -187,19 +187,30 @@ def test_mutated_result_cannot_overwrite_valid_archive(tmp_path, mutation):
 
 
 @pytest.mark.parametrize("compressed", [False, True])
+@pytest.mark.parametrize("failure", ["write", "replace"])
 def test_failed_writer_preserves_previous_archive_and_cleans_temporary_file(
-    tmp_path, monkeypatch, compressed
+    tmp_path, monkeypatch, compressed, failure
 ):
+    import workspace_analyzer._atomic as atomic
+
     result = AnalysisResult(np.zeros((1, 3)), np.zeros((1, 1)), None, {})
     path = tmp_path / "result.npz"
     result.save(path)
     original = path.read_bytes()
 
-    def fail(path, **payload):
-        Path(path).write_bytes(b"partial archive")
-        raise OSError("simulated disk failure")
+    if failure == "write":
 
-    monkeypatch.setattr(np, "savez_compressed" if compressed else "savez", fail)
+        def fail(stream, **payload):
+            stream.write(b"partial archive")
+            raise OSError("simulated disk failure")
+
+        monkeypatch.setattr(np, "savez_compressed" if compressed else "savez", fail)
+    else:
+
+        def fail(*args):
+            raise OSError("simulated disk failure")
+
+        monkeypatch.setattr(atomic.os, "replace", fail)
     with pytest.raises(OSError, match="disk failure"):
         result.save(path, compressed=compressed)
     assert path.read_bytes() == original

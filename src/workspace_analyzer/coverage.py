@@ -100,8 +100,6 @@ def summarize_orientation_coverage(
         raise ValueError("target_poses must match the assessment points")
     accepted = _validated_quality_flags(result, reachable, metrics)
     weights = metrics["task_weight"]
-    if not np.isfinite(weights).all() or np.any(weights < 0):
-        raise ValueError("task weights must be finite and non-negative")
     check_cancelled(cancel_event)
     _, first, inverse = np.unique(ids, return_index=True, return_inverse=True)
     check_cancelled(cancel_event)

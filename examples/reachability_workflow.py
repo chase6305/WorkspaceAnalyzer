@@ -22,6 +22,7 @@ from workspace_analyzer import (
     make_ik_seed_trials,
     refine_translation_boundary,
 )
+from workspace_analyzer._arrays import as_numpy as _numpy
 
 
 def main(argv=None) -> int:
@@ -707,12 +708,6 @@ def _markdown(report):
         ]
     )
     return "\n".join(lines)
-
-
-def _numpy(value):
-    return (
-        value.detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value)
-    )
 
 
 if __name__ == "__main__":

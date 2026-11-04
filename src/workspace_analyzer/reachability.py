@@ -9,9 +9,10 @@ from numbers import Real
 
 import numpy as np
 
+from ._arrays import as_numpy as _numpy
 from ._cancellation import check_cancelled
 from ._validation import require_integer
-from .analyzer import AnalysisResult, _numpy
+from .analyzer import AnalysisResult
 from .cache import analysis_cache_key
 from .kinematics import _validate_homogeneous_rows, _validate_rotation_matrices
 from .metrics import _dexterity_from_jacobian, _validate_task_weights
@@ -273,7 +274,7 @@ def analyze_targets(
         reachable, metrics, task_weights, config
     )
     manipulability = metrics.pop("manipulability")
-    metrics.update(quality_pass=quality_pass, task_rank=rank, task_weight=task_weights)
+    metrics.update(quality_pass=quality_pass, task_weight=task_weights)
     result = AnalysisResult(
         points=points,
         joint_positions=joints,
@@ -353,9 +354,18 @@ def reassess_quality(
     )
     # Derived summaries, if attached by a caller, must be rebuilt for new gates.
     metadata.pop("orientation_coverage", None)
+    if "plane_scan" in metadata:
+        metadata["plane_scan"].update(
+            assessment=summary, quality_thresholds=metadata["quality_thresholds"]
+        )
     metrics = {**result.metrics, "quality_pass": accepted, "task_weight": task_weights}
     check_cancelled(cancel_event)
-    return replace(result, metadata=metadata, metrics=metrics)
+    updated = replace(result, metadata=metadata, metrics=metrics)
+    if "acceptance" in metadata:
+        from .acceptance import reassess_acceptance
+
+        updated = reassess_acceptance(updated)
+    return updated
 
 
 def _quality_inputs(result, *, weights=None, **thresholds):
@@ -366,9 +376,7 @@ def _quality_inputs(result, *, weights=None, **thresholds):
         dexterity_task=result.metadata["dexterity_task"],
         **thresholds,
     )
-    task_weights = np.asarray(
-        _numpy(metrics["task_weight"] if weights is None else weights)
-    )
+    task_weights = _numpy(metrics["task_weight"] if weights is None else weights)
     if task_weights.dtype.kind not in "iuf" or not np.isfinite(task_weights).all():
         raise ValueError("weights must contain finite real numeric values")
     if (
@@ -497,7 +505,7 @@ def _assessment_summary(reachable, metrics, task_weights, config):
 
 
 def _real_array(value, name, *, dtype):
-    array = np.asarray(_numpy(value))
+    array = _numpy(value)
     if array.dtype.kind not in "iuf" or not np.isfinite(array).all():
         raise ValueError(f"{name} must contain finite real numeric values")
     with np.errstate(over="ignore", invalid="ignore"):

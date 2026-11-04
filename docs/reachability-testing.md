@@ -99,6 +99,8 @@ URDF 的米，姿态使用旋转矩阵；`result.points` 和可选 `result.targe
 | `task_weight` | 原始任务权重，用于加权成功率与质量达标率 |
 
 `dexterity_task` 可选 `position`、`rotation`、`pose`。前两者任务维度为 3，后者为 6。
+它与 IK 约束独立：`position_only=False` 不会改变默认的 `dexterity_task="position"`；
+需要六维位姿质量判定时，显式设置 `dexterity_task="pose"`。
 少自由度机器人的紧致 SVD 指标可能大于零，但不代表完整任务可控。
 `require_full_rank=True` 明确要求数值秩等于任务维度；例如三轴平移机构不能通过
 六维位姿任务的满秩要求，即使能到达某个特定姿态。

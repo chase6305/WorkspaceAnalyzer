@@ -230,3 +230,263 @@ def test_cli_uncompressed_requires_cache_directory():
     with pytest.raises(SystemExit) as error:
         main([str(URDF), "--cache-uncompressed"])
     assert error.value.code == 2
+
+
+@pytest.mark.parametrize("alias", ["same", "normalized", "symlink", "hardlink"])
+def test_output_collision_is_rejected_before_loading_or_overwriting(
+    alias, tmp_path, capsys, monkeypatch
+):
+    import os
+
+    import workspace_analyzer.cli as cli
+
+    destination = tmp_path / "samples.npz"
+    destination.write_bytes(b"previous completed result")
+    report = destination
+    output = destination.with_suffix(".json") if alias == "normalized" else destination
+    if alias in {"symlink", "hardlink"}:
+        report = tmp_path / "report.json"
+        if alias == "symlink":
+            report.symlink_to(destination)
+        else:
+            os.link(destination, report)
+    monkeypatch.setattr(
+        cli,
+        "create_solver",
+        lambda *a, **k: pytest.fail("started solver before validating destinations"),
+    )
+    with pytest.raises(SystemExit) as error:
+        main(
+            [
+                str(URDF),
+                "--plane",
+                "xy",
+                "--output",
+                str(output),
+                "--report",
+                str(report),
+            ]
+        )
+    assert error.value.code == 2
+    assert "distinct paths" in capsys.readouterr().err
+    assert destination.read_bytes() == b"previous completed result"
+
+
+@pytest.mark.parametrize("target_input", [False, True])
+def test_outputs_cannot_overwrite_task_inputs(tmp_path, target_input, capsys):
+    if target_input:
+        source = tmp_path / "targets.npz"
+        np.savez(source, targets=[[0, 0, 0]])
+        args = [
+            str(URDF),
+            "--mode",
+            "targets",
+            "--targets",
+            str(source),
+            "--output",
+            str(source),
+        ]
+    else:
+        source = tmp_path / "robot.urdf"
+        source.write_bytes(URDF.read_bytes())
+        args = [str(source), "--plane", "xy", "--report", str(source)]
+    original = source.read_bytes()
+    with pytest.raises(SystemExit) as error:
+        main(args)
+    assert error.value.code == 2
+    assert "distinct paths" in capsys.readouterr().err
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("flags", [["--samples", "1"], ["--strategy", "random"]])
+def test_targets_cli_rejects_ignored_sampling_flags(
+    flags, tmp_path, capsys, monkeypatch
+):
+    import workspace_analyzer.cli as cli
+
+    monkeypatch.setattr(
+        cli, "create_solver", lambda *a, **k: pytest.fail("started solver")
+    )
+    with pytest.raises(SystemExit) as error:
+        main(
+            [
+                str(URDF),
+                "--mode",
+                "targets",
+                "--targets",
+                str(tmp_path / "targets.npy"),
+                *flags,
+            ]
+        )
+    assert error.value.code == 2
+    assert "uses all input rows" in capsys.readouterr().err
+
+
+def test_plane_cli_export_failure_still_saves_other_artifacts(
+    tmp_path, capsys, monkeypatch
+):
+    import workspace_analyzer.cli as cli
+
+    report = tmp_path / "plane.json"
+    original_analyze = cli.analyze_plane
+
+    def analyze_then_block_report(*args, **kwargs):
+        result = original_analyze(*args, **kwargs)
+        report.mkdir()
+        return result
+
+    monkeypatch.setattr(cli, "analyze_plane", analyze_then_block_report)
+    with pytest.raises(SystemExit) as error:
+        main(
+            [
+                str(URDF.with_name("cartesian_stage.urdf")),
+                "--backend",
+                "numpy",
+                "--plane",
+                "xy",
+                "--resolution",
+                "3",
+                "--output",
+                str(tmp_path / "plane.npz"),
+                "--report",
+                str(report),
+                "--plot",
+                str(tmp_path / "plane.svg"),
+            ]
+        )
+    assert error.value.code == 2
+    message = capsys.readouterr().err
+    assert "calculation completed; save failed" in message
+    assert "plane.json" in message and "Saved:" in message
+    result = AnalysisResult.load(tmp_path / "plane.npz")
+    assert result.reachable.all() and len(result.points) == 9
+    assert (tmp_path / "plane.svg").read_text().startswith("<svg")
+
+
+@pytest.mark.parametrize("mode", ["joint", "cartesian", "targets", "plane"])
+def test_progress_reaches_completion_on_stderr(mode, tmp_path, capsys):
+    options = ["--mode", mode, "--progress", "--backend", "numpy", "--batch-size", "2"]
+    if mode == "plane":
+        options += ["--resolution", "3"]
+    elif mode == "targets":
+        path = tmp_path / "targets.npy"
+        np.save(path, np.zeros((3, 3)))
+        options += ["--targets", str(path)]
+    else:
+        options += ["--samples", "3"]
+        if mode == "cartesian":
+            options += ["--bounds", "0", "0.1", "0", "0.1", "0", "0.1"]
+    result = main([str(URDF.with_name("cartesian_stage.urdf")), *options])
+    out = capsys.readouterr()
+    assert f"{mode}: 0.0%" in out.err
+    assert f"{mode}: 100.0%" in out.err
+    assert "elapsed" not in out.out
+    assert len(result.points) == (9 if mode == "plane" else 3)
+
+
+@pytest.mark.parametrize("entry", ["module", "demo"])
+def test_cli_interrupt_has_clean_status_and_preserves_old_output(tmp_path, entry):
+    import signal
+
+    output = tmp_path / "previous.npz"
+    output.write_bytes(b"old completed run")
+    command = (
+        ["-m", "workspace_analyzer"]
+        if entry == "module"
+        else [
+            str(Path(__file__).parents[1] / "examples/plane_reachability.py"),
+            "--urdf",
+        ]
+    )
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            *command,
+            str(URDF.with_name("cartesian_stage.urdf")),
+            "--plane",
+            "xy",
+            "--samples",
+            "1000000",
+            "--backend",
+            "numpy",
+            "--progress",
+            "--output",
+            str(output),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        # Progress starts immediately before entering the potentially long analysis.
+        line = process.stderr.readline()
+        assert "plane: 0.0%" in line
+        process.send_signal(signal.SIGINT)
+        stdout, stderr = process.communicate(timeout=10)
+        assert process.returncode == 130
+        assert "Interrupted." in stderr and "Traceback" not in stderr
+        assert output.read_bytes() == b"old completed run"
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "npy_as_npz",
+        "npz_as_npy",
+        "truncated_npz",
+        "missing_member",
+        "bad_compressed_member",
+    ],
+)
+def test_bad_target_archives_fail_cleanly_without_replacing_outputs(kind, tmp_path):
+    import zipfile
+
+    path = tmp_path / ("targets.npy" if kind == "npz_as_npy" else "targets.npz")
+    with path.open("wb") as stream:
+        if kind == "npy_as_npz":
+            np.save(stream, [[0, 0, 0]])
+        else:
+            np.savez_compressed(stream, targets=np.zeros((8, 3)))
+    if kind == "truncated_npz":
+        path.write_bytes(path.read_bytes()[:-12])
+    elif kind == "missing_member":
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("targets.npy", b"")
+    elif kind == "bad_compressed_member":
+        data = bytearray(path.read_bytes())
+        with zipfile.ZipFile(path) as archive:
+            member = archive.getinfo("targets.npy")
+            offset = member.header_offset
+        name_size = int.from_bytes(data[offset + 26 : offset + 28], "little")
+        extra_size = int.from_bytes(data[offset + 28 : offset + 30], "little")
+        payload = offset + 30 + name_size + extra_size
+        data[payload : payload + member.compress_size] = b"\xff" * member.compress_size
+        path.write_bytes(data)
+    output = tmp_path / "previous.npz"
+    output.write_bytes(b"last completed result")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "workspace_analyzer",
+            str(URDF),
+            "--backend",
+            "numpy",
+            "--mode",
+            "targets",
+            "--targets",
+            str(path),
+            "--output",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert completed.returncode == 2, completed.stderr
+    assert "error:" in completed.stderr and "Traceback" not in completed.stderr
+    assert output.read_bytes() == b"last completed result"

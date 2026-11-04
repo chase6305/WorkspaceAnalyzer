@@ -110,6 +110,23 @@ class RobotModel:
         children = set(self._by_child)
         return tuple(link for link in self.links if link not in children)
 
+    def zero_transforms(self) -> dict[str, np.ndarray]:
+        """Return root-relative link poses with every movable joint set to zero.
+
+        Each root starts at identity. This describes the URDF geometry, even
+        when zero is outside a joint's motion limits. Returned arrays are fresh.
+        """
+        children = {}
+        for joint in self.joints:
+            children.setdefault(joint.parent, []).append(joint)
+        transforms = {root: np.eye(4) for root in self.root_links}
+        queue = list(transforms)
+        for parent in queue:
+            for joint in children.get(parent, ()):
+                transforms[joint.child] = transforms[parent] @ joint.origin
+                queue.append(joint.child)
+        return transforms
+
     @property
     def leaf_links(self) -> tuple[str, ...]:
         parents = {j.parent for j in self.joints}

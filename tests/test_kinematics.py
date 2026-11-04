@@ -372,9 +372,15 @@ def test_cartesian_analysis_handles_singleton_batches(backend, count, batch):
 
 
 @pytest.mark.parametrize("compute_jacobians", [True, False])
-def test_workspace_batches_agree_with_direct_computation(compute_jacobians):
+@pytest.mark.parametrize("backend", ["numpy", "torch"])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_workspace_batches_agree_with_direct_computation(
+    compute_jacobians, backend, dtype
+):
+    if backend == "torch":
+        pytest.importorskip("torch")
     solver = KinematicsSolver(
-        RobotModel.from_urdf(URDF), config=SolverConfig(backend="numpy")
+        RobotModel.from_urdf(URDF), config=SolverConfig(backend=backend, dtype=dtype)
     )
     result = WorkspaceAnalyzer(
         solver,
@@ -383,15 +389,39 @@ def test_workspace_batches_agree_with_direct_computation(compute_jacobians):
         ),
     ).analyze()
     np.testing.assert_allclose(
-        result.points, solver.forward(result.joint_positions)[:, :3, 3]
+        result.points, _to_numpy(solver.forward(result.joint_positions))[:, :3, 3]
     )
     if compute_jacobians:
         quality = solver.dexterity(result.joint_positions)
-        np.testing.assert_allclose(result.manipulability, quality.manipulability)
+        np.testing.assert_allclose(
+            result.manipulability, _to_numpy(quality.manipulability)
+        )
         for name, values in result.metrics.items():
-            np.testing.assert_allclose(values, getattr(quality, name))
+            np.testing.assert_allclose(values, _to_numpy(getattr(quality, name)))
     else:
         assert result.manipulability is result.metrics is None
+
+
+@pytest.mark.parametrize("backend", ["numpy", "torch"])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_workspace_isotropy_is_invariant_to_link_scale(backend, dtype, tmp_path):
+    if backend == "torch":
+        pytest.importorskip("torch")
+    robot = tmp_path / "small-arm.urdf"
+    robot.write_text(URDF.read_text().replace('xyz="1 0 0"', 'xyz="1e-34 0 0"'))
+    model = RobotModel.from_urdf(URDF)
+    small_model = RobotModel.from_urdf(robot)
+    config = WorkspaceConfig(SamplingConfig(num_samples=10, batch_size=3))
+    solver_config = SolverConfig(backend=backend, dtype=dtype)
+    normal = WorkspaceAnalyzer(KinematicsSolver(model, config=solver_config), config)
+    small = WorkspaceAnalyzer(
+        KinematicsSolver(small_model, config=solver_config), config
+    )
+    np.testing.assert_allclose(
+        small.analyze().metrics["isotropy"],
+        normal.analyze().metrics["isotropy"],
+        rtol=2e-5,
+    )
 
 
 def test_cancelled_final_batch_is_not_published_or_cached(tmp_path):

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ._atomic import atomic_open, atomic_write_text
 from ._cancellation import check_cancelled
 from ._validation import require_integer
 from .analyzer import AnalysisResult
@@ -94,24 +95,22 @@ class BoundaryResult:
 
     def save(self, directory: str | Path) -> None:
         """Save measurements, sample-to-segment mapping, and strict JSON report."""
+        report = json.dumps(self.to_dict(), indent=2, allow_nan=False) + "\n"
         directory = Path(directory)
-        directory.mkdir(parents=True, exist_ok=True)
         self.measurements.save(directory / "measurements.npz")
-        np.savez_compressed(
-            directory / "trace.npz",
-            segment_ids=self.segment_ids,
-            parameters=self.parameters,
-            stages=self.stages,
-            lower_indices=self.lower_indices,
-            upper_indices=self.upper_indices,
-            statuses=self.statuses,
-            rounds=self.rounds,
-            initial_brackets=self.initial_brackets,
-        )
-        (directory / "report.json").write_text(
-            json.dumps(self.to_dict(), indent=2, allow_nan=False) + "\n",
-            encoding="utf-8",
-        )
+        with atomic_open(directory / "trace.npz") as stream:
+            np.savez_compressed(
+                stream,
+                segment_ids=self.segment_ids,
+                parameters=self.parameters,
+                stages=self.stages,
+                lower_indices=self.lower_indices,
+                upper_indices=self.upper_indices,
+                statuses=self.statuses,
+                rounds=self.rounds,
+                initial_brackets=self.initial_brackets,
+            )
+        atomic_write_text(directory / "report.json", report)
 
 
 def refine_translation_boundary(
